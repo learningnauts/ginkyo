@@ -14,12 +14,30 @@ from __future__ import annotations
 
 from pathlib import Path
 from io import StringIO
+import re
 
 import numpy as np
 
 from nagilize.core.model import Channel, Recording
 
 _TIME_NAMES = {"time", "time_s", "t", "times", "timestamp"}
+# "Name [unit]" or "Name (unit)" — unit is optional trailing bracket group.
+_HEADER_UNIT_RE = re.compile(
+    r"^(?P<name>.*?)\s*[\[\(]\s*(?P<unit>[^\]\)]+?)\s*[\]\)]\s*$"
+)
+
+
+def parse_channel_header(raw: str) -> tuple[str, str]:
+    """Split ``Name [unit]`` / ``Name (unit)`` into ``(name, unit)``."""
+    text = (raw or "").strip()
+    if not text:
+        return "Ch", ""
+    m = _HEADER_UNIT_RE.match(text)
+    if m:
+        name = m.group("name").strip() or "Ch"
+        unit = m.group("unit").strip()
+        return name, unit
+    return text, ""
 
 
 def read_csv(path: str | Path, *, sample_rate: float | None = None) -> Recording:
@@ -66,10 +84,13 @@ def read_csv(path: str | Path, *, sample_rate: float | None = None) -> Recording
         fs = _fs_from_time(t)
         if sample_rate is not None:
             fs = float(sample_rate)
-        channels = [
-            Channel(name=ch_names[i] if i < len(ch_names) else f"Ch{i+1}", data=data[:, i].copy())
-            for i in range(data.shape[1])
-        ]
+        channels = []
+        for i in range(data.shape[1]):
+            raw = ch_names[i] if i < len(ch_names) else f"Ch{i+1}"
+            name, unit = parse_channel_header(raw)
+            channels.append(
+                Channel(name=name, data=data[:, i].copy(), unit=unit)
+            )
         return Recording(
             sample_rate=fs,
             channels=channels,
@@ -83,10 +104,11 @@ def read_csv(path: str | Path, *, sample_rate: float | None = None) -> Recording
             "CSV has no time column; pass sample_rate=... or add a comment "
             "'# sample_rate=1000' on the first line"
         )
-    channels = [
-        Channel(name=ch_names[i] if i < len(ch_names) else f"Ch{i+1}", data=table[:, i].copy())
-        for i in range(table.shape[1])
-    ]
+    channels = []
+    for i in range(table.shape[1]):
+        raw = ch_names[i] if i < len(ch_names) else f"Ch{i+1}"
+        name, unit = parse_channel_header(raw)
+        channels.append(Channel(name=name, data=table[:, i].copy(), unit=unit))
     return Recording(sample_rate=fs, channels=channels, source=str(path.resolve()))
 
 

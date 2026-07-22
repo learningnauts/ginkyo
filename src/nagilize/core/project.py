@@ -28,8 +28,19 @@ class Series:
     _data: np.ndarray | None = field(default=None, repr=False, compare=False)
     _time: np.ndarray | None = field(default=None, repr=False, compare=False)
     _phase: np.ndarray | None = field(default=None, repr=False, compare=False)
+    _frame_time: np.ndarray | None = field(default=None, repr=False, compare=False)
+    _frame_angle: np.ndarray | None = field(default=None, repr=False, compare=False)
+    _frame_rpm: np.ndarray | None = field(default=None, repr=False, compare=False)
     _loader: Callable[
-        [], tuple[np.ndarray, np.ndarray | None, np.ndarray | None]
+        [],
+        tuple[
+            np.ndarray,
+            np.ndarray | None,
+            np.ndarray | None,
+            np.ndarray | None,
+            np.ndarray | None,
+            np.ndarray | None,
+        ],
     ] | None = field(default=None, repr=False, compare=False)
 
     @classmethod
@@ -46,9 +57,13 @@ class Series:
         channel_index: int = 0,
         time: np.ndarray | None = None,
         phase: np.ndarray | None = None,
+        frame_time: np.ndarray | None = None,
+        frame_angle: np.ndarray | None = None,
+        frame_rpm: np.ndarray | None = None,
         meta: SeriesMeta | None = None,
     ) -> Series:
         arr = np.asarray(data, dtype=np.float64)
+        n_hint = int(arr.shape[-1]) if arr.ndim == 2 else int(arr.shape[0])
         return cls(
             id=id,
             name=name,
@@ -58,10 +73,19 @@ class Series:
             source_label=source_label,
             channel_index=channel_index,
             meta=meta or SeriesMeta(),
-            n_samples_hint=int(arr.shape[0]),
+            n_samples_hint=n_hint,
             _data=arr,
             _time=None if time is None else np.asarray(time, dtype=float),
             _phase=None if phase is None else np.asarray(phase, dtype=np.float64),
+            _frame_time=None
+            if frame_time is None
+            else np.asarray(frame_time, dtype=float),
+            _frame_angle=None
+            if frame_angle is None
+            else np.asarray(frame_angle, dtype=float),
+            _frame_rpm=None
+            if frame_rpm is None
+            else np.asarray(frame_rpm, dtype=float),
             _loader=None,
         )
 
@@ -73,7 +97,17 @@ class Series:
         name: str,
         sample_rate: float,
         n_samples: int,
-        loader: Callable[[], tuple[np.ndarray, np.ndarray | None, np.ndarray | None]],
+        loader: Callable[
+            [],
+            tuple[
+                np.ndarray,
+                np.ndarray | None,
+                np.ndarray | None,
+                np.ndarray | None,
+                np.ndarray | None,
+                np.ndarray | None,
+            ],
+        ],
         unit: str = "",
         source_id: str = "",
         source_label: str = "",
@@ -93,6 +127,9 @@ class Series:
             _data=None,
             _time=None,
             _phase=None,
+            _frame_time=None,
+            _frame_angle=None,
+            _frame_rpm=None,
             _loader=loader,
         )
 
@@ -107,17 +144,47 @@ class Series:
             self._data = np.zeros(0, dtype=np.float64)
             self._time = None
             self._phase = None
+            self._frame_time = None
+            self._frame_angle = None
+            self._frame_rpm = None
             return
         loaded = self._loader()
         if len(loaded) == 2:
             data, time = loaded
             phase = None
-        else:
+            frame_time = None
+            frame_angle = None
+            frame_rpm = None
+        elif len(loaded) == 3:
             data, time, phase = loaded
+            frame_time = None
+            frame_angle = None
+            frame_rpm = None
+        elif len(loaded) == 4:
+            data, time, phase, frame_time = loaded
+            frame_angle = None
+            frame_rpm = None
+        elif len(loaded) == 5:
+            data, time, phase, frame_time, frame_angle = loaded
+            frame_rpm = None
+        else:
+            data, time, phase, frame_time, frame_angle, frame_rpm = loaded
         self._data = np.asarray(data, dtype=np.float64)
         self._time = None if time is None else np.asarray(time, dtype=float)
         self._phase = None if phase is None else np.asarray(phase, dtype=np.float64)
-        self.n_samples_hint = int(self._data.shape[0])
+        self._frame_time = (
+            None if frame_time is None else np.asarray(frame_time, dtype=float)
+        )
+        self._frame_angle = (
+            None if frame_angle is None else np.asarray(frame_angle, dtype=float)
+        )
+        self._frame_rpm = (
+            None if frame_rpm is None else np.asarray(frame_rpm, dtype=float)
+        )
+        if self._data.ndim == 2:
+            self.n_samples_hint = int(self._data.shape[-1])
+        else:
+            self.n_samples_hint = int(self._data.shape[0])
         self._loader = None
 
     @property
@@ -162,12 +229,53 @@ class Series:
         self.ensure_loaded()
         self._phase = None if value is None else np.asarray(value, dtype=np.float64)
 
+    @property
+    def frame_time_s(self) -> np.ndarray | None:
+        """Frame center times for spectrogram results; None for 1D series."""
+        self.ensure_loaded()
+        return self._frame_time
+
+    @frame_time_s.setter
+    def frame_time_s(self, value: np.ndarray | None) -> None:
+        self.ensure_loaded()
+        self._frame_time = None if value is None else np.asarray(value, dtype=float)
+
+    @property
+    def frame_angle_deg(self) -> np.ndarray | None:
+        """Frame center angles (deg) for equal-angle spectrograms; else None."""
+        self.ensure_loaded()
+        return self._frame_angle
+
+    @frame_angle_deg.setter
+    def frame_angle_deg(self, value: np.ndarray | None) -> None:
+        self.ensure_loaded()
+        self._frame_angle = None if value is None else np.asarray(value, dtype=float)
+
+    @property
+    def frame_rpm(self) -> np.ndarray | None:
+        """Frame center RPM for equal-RPM spectrograms; else None."""
+        self.ensure_loaded()
+        return self._frame_rpm
+
+    @frame_rpm.setter
+    def frame_rpm(self, value: np.ndarray | None) -> None:
+        self.ensure_loaded()
+        self._frame_rpm = None if value is None else np.asarray(value, dtype=float)
+
     def is_spectrum(self) -> bool:
         return (self.meta.quantity or "").strip().lower() == "spectrum"
+
+    def is_spectrogram(self) -> bool:
+        return (self.meta.quantity or "").strip().lower() in ("spectrogram", "stft")
+
+    def is_fft_result(self) -> bool:
+        return self.is_spectrum() or self.is_spectrogram()
 
     @property
     def n_samples(self) -> int:
         if self._data is not None:
+            if self._data.ndim == 2:
+                return int(self._data.shape[-1])
             return int(self._data.shape[0])
         return int(self.n_samples_hint)
 
@@ -291,12 +399,18 @@ class Project:
         """Keep only ids that still exist in the pool."""
         return [sid for sid in series_ids if sid in self.series]
 
-    def ensure_analysis_source(self) -> SourceRef:
-        """Return (creating if needed) the synthetic Analysis source."""
-        existing = self.source_by_id("analysis")
-        if existing is not None:
-            return existing
-        src = SourceRef(id="analysis", label="Analysis", recording=None, provenance="analysis")
+    def create_analysis_dataset(
+        self, *, label: str | None = None, provenance: str = "analysis:fft"
+    ) -> SourceRef:
+        """Create a new Analysis dataset (one per FFT run)."""
+        source_id = f"analysis:{uuid4().hex[:8]}"
+        n = 1 + sum(1 for s in self.sources if str(s.id).startswith("analysis"))
+        src = SourceRef(
+            id=source_id,
+            label=(label or f"FFT result {n}").strip() or f"FFT result {n}",
+            recording=None,
+            provenance=provenance,
+        )
         self.sources.append(src)
         return src
 
@@ -312,10 +426,16 @@ class Project:
         parent: Series | None = None,
         params_dict: dict | None = None,
         attrs: dict | None = None,
+        source: SourceRef | None = None,
     ) -> str:
-        """Add one spectrum result (Mag+Phase) to the series pool. Returns series id."""
-        self.ensure_analysis_source()
-        sid = f"analysis:{uuid4().hex[:10]}"
+        """Add one spectrum result into an Analysis dataset. Returns series id.
+
+        If ``source`` is omitted, a new dataset is created (single-result run).
+        For batch FFT, create one dataset with ``create_analysis_dataset`` and
+        pass it to every call in that run.
+        """
+        dataset = source if source is not None else self.create_analysis_dataset()
+        sid = f"{dataset.id}:ch{uuid4().hex[:8]}"
         freq = np.asarray(frequency_hz, dtype=np.float64).reshape(-1)
         mag = np.asarray(magnitude, dtype=np.float64).reshape(-1)
         phase = np.asarray(phase_rad, dtype=np.float64).reshape(-1)
@@ -339,17 +459,104 @@ class Project:
             ),
             attrs=meta_attrs,
         )
+        # Channel index = order within this dataset so far.
+        ch_index = sum(1 for s in self.series.values() if s.source_id == dataset.id)
         series = Series.create(
             id=sid,
             name=name,
             sample_rate=float(sample_rate),
             data=mag,
             unit=unit,
-            source_id="analysis",
-            source_label="Analysis",
-            channel_index=0,
+            source_id=dataset.id,
+            source_label=dataset.label,
+            channel_index=ch_index,
             time=freq,
             phase=phase,
+            meta=meta,
+        )
+        self.series[sid] = series
+        self.series_order.append(sid)
+        return sid
+
+    def add_spectrogram_result(
+        self,
+        *,
+        name: str,
+        frequency_hz: np.ndarray,
+        time_s: np.ndarray,
+        magnitude: np.ndarray,
+        phase_rad: np.ndarray,
+        sample_rate: float,
+        unit: str = "",
+        parent: Series | None = None,
+        params_dict: dict | None = None,
+        attrs: dict | None = None,
+        source: SourceRef | None = None,
+        angle_deg: np.ndarray | None = None,
+        rpm: np.ndarray | None = None,
+    ) -> str:
+        """Add one STFT spectrogram result into an Analysis dataset."""
+        dataset = source if source is not None else self.create_analysis_dataset(
+            provenance="analysis:stft"
+        )
+        sid = f"{dataset.id}:ch{uuid4().hex[:8]}"
+        freq = np.asarray(frequency_hz, dtype=np.float64).reshape(-1)
+        times = np.asarray(time_s, dtype=np.float64).reshape(-1)
+        mag = np.asarray(magnitude, dtype=np.float64)
+        phase = np.asarray(phase_rad, dtype=np.float64)
+        angles = (
+            None
+            if angle_deg is None
+            else np.asarray(angle_deg, dtype=np.float64).reshape(-1)
+        )
+        rpms = (
+            None if rpm is None else np.asarray(rpm, dtype=np.float64).reshape(-1)
+        )
+        if mag.ndim != 2 or phase.ndim != 2:
+            raise ValueError("magnitude and phase must be 2-D arrays")
+        if mag.shape != phase.shape:
+            raise ValueError("magnitude and phase must have the same shape")
+        if mag.shape[0] != freq.size:
+            raise ValueError("frequency axis must match magnitude rows")
+        if mag.shape[1] != times.size:
+            raise ValueError("time axis must match magnitude columns")
+        if angles is not None and angles.size != times.size:
+            raise ValueError("angle axis must match time axis length")
+        if rpms is not None and rpms.size != times.size:
+            raise ValueError("rpm axis must match time axis length")
+        meta_attrs = dict(attrs or {})
+        if params_dict:
+            meta_attrs["stft_params"] = dict(params_dict)
+        if parent is not None:
+            meta_attrs["parent_series_id"] = parent.id
+        meta = SeriesMeta(
+            quantity="spectrogram",
+            point_id=parent.meta.point_id if parent else "",
+            point_name=parent.meta.point_name if parent else "",
+            dof=parent.meta.dof if parent else "",
+            ref_point_id=parent.meta.ref_point_id if parent else "",
+            ref_point_name=parent.meta.ref_point_name if parent else "",
+            ref_dof=parent.meta.ref_dof if parent else "",
+            provenance=(
+                f"STFT of {parent.display_name}" if parent is not None else "STFT"
+            ),
+            attrs=meta_attrs,
+        )
+        ch_index = sum(1 for s in self.series.values() if s.source_id == dataset.id)
+        series = Series.create(
+            id=sid,
+            name=name,
+            sample_rate=float(sample_rate),
+            data=mag,
+            unit=unit,
+            source_id=dataset.id,
+            source_label=dataset.label,
+            channel_index=ch_index,
+            time=freq,
+            phase=phase,
+            frame_time=times,
+            frame_angle=angles,
+            frame_rpm=rpms,
             meta=meta,
         )
         self.series[sid] = series

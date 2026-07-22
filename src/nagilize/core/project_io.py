@@ -67,6 +67,9 @@ def save_project(
             data_name = f"data/{safe}.npy"
             time_name = None
             phase_name = None
+            frame_time_name = None
+            frame_angle_name = None
+            frame_rpm_name = None
             np.save(data_dir / f"{safe}.npy", series.data)
             if series.time is not None:
                 time_name = f"data/{safe}.time.npy"
@@ -74,6 +77,15 @@ def save_project(
             if series.phase_rad is not None:
                 phase_name = f"data/{safe}.phase.npy"
                 np.save(data_dir / f"{safe}.phase.npy", series.phase_rad)
+            if series.frame_time_s is not None:
+                frame_time_name = f"data/{safe}.frame_time.npy"
+                np.save(data_dir / f"{safe}.frame_time.npy", series.frame_time_s)
+            if series.frame_angle_deg is not None:
+                frame_angle_name = f"data/{safe}.frame_angle.npy"
+                np.save(data_dir / f"{safe}.frame_angle.npy", series.frame_angle_deg)
+            if series.frame_rpm is not None:
+                frame_rpm_name = f"data/{safe}.frame_rpm.npy"
+                np.save(data_dir / f"{safe}.frame_rpm.npy", series.frame_rpm)
             catalog["series"].append(
                 {
                     "id": series.id,
@@ -87,6 +99,9 @@ def save_project(
                     "data_entry": data_name,
                     "time_entry": time_name,
                     "phase_entry": phase_name,
+                    "frame_time_entry": frame_time_name,
+                    "frame_angle_entry": frame_angle_name,
+                    "frame_rpm_entry": frame_rpm_name,
                     "meta": series.meta.to_dict(),
                 }
             )
@@ -141,9 +156,21 @@ def load_project(path: str | Path) -> Project:
     zip_path = path
 
     def make_loader(
-        data_entry: str, time_entry: str | None, phase_entry: str | None
+        data_entry: str,
+        time_entry: str | None,
+        phase_entry: str | None,
+        frame_time_entry: str | None,
+        frame_angle_entry: str | None,
+        frame_rpm_entry: str | None,
     ):
-        def _load() -> tuple[np.ndarray, np.ndarray | None, np.ndarray | None]:
+        def _load() -> tuple[
+            np.ndarray,
+            np.ndarray | None,
+            np.ndarray | None,
+            np.ndarray | None,
+            np.ndarray | None,
+            np.ndarray | None,
+        ]:
             data_cache = cache / Path(data_entry).name
             if not data_cache.exists():
                 with zipfile.ZipFile(zip_path, "r") as zf:
@@ -155,6 +182,18 @@ def load_project(path: str | Path) -> Project:
                         phase_cache = cache / Path(phase_entry).name
                         if phase_entry in zf.namelist():
                             phase_cache.write_bytes(zf.read(phase_entry))
+                    if frame_time_entry:
+                        frame_cache = cache / Path(frame_time_entry).name
+                        if frame_time_entry in zf.namelist():
+                            frame_cache.write_bytes(zf.read(frame_time_entry))
+                    if frame_angle_entry:
+                        angle_cache = cache / Path(frame_angle_entry).name
+                        if frame_angle_entry in zf.namelist():
+                            angle_cache.write_bytes(zf.read(frame_angle_entry))
+                    if frame_rpm_entry:
+                        rpm_cache = cache / Path(frame_rpm_entry).name
+                        if frame_rpm_entry in zf.namelist():
+                            rpm_cache.write_bytes(zf.read(frame_rpm_entry))
             data = np.load(data_cache)
             time = None
             if time_entry:
@@ -172,10 +211,40 @@ def load_project(path: str | Path) -> Project:
                             phase_cache.write_bytes(zf.read(phase_entry))
                 if phase_cache.exists():
                     phase = np.load(phase_cache)
+            frame_time = None
+            if frame_time_entry:
+                frame_cache = cache / Path(frame_time_entry).name
+                if not frame_cache.exists():
+                    with zipfile.ZipFile(zip_path, "r") as zf:
+                        if frame_time_entry in zf.namelist():
+                            frame_cache.write_bytes(zf.read(frame_time_entry))
+                if frame_cache.exists():
+                    frame_time = np.load(frame_cache)
+            frame_angle = None
+            if frame_angle_entry:
+                angle_cache = cache / Path(frame_angle_entry).name
+                if not angle_cache.exists():
+                    with zipfile.ZipFile(zip_path, "r") as zf:
+                        if frame_angle_entry in zf.namelist():
+                            angle_cache.write_bytes(zf.read(frame_angle_entry))
+                if angle_cache.exists():
+                    frame_angle = np.load(angle_cache)
+            frame_rpm = None
+            if frame_rpm_entry:
+                rpm_cache = cache / Path(frame_rpm_entry).name
+                if not rpm_cache.exists():
+                    with zipfile.ZipFile(zip_path, "r") as zf:
+                        if frame_rpm_entry in zf.namelist():
+                            rpm_cache.write_bytes(zf.read(frame_rpm_entry))
+                if rpm_cache.exists():
+                    frame_rpm = np.load(rpm_cache)
             return (
                 np.asarray(data, dtype=np.float64),
                 None if time is None else np.asarray(time, dtype=float),
                 None if phase is None else np.asarray(phase, dtype=np.float64),
+                None if frame_time is None else np.asarray(frame_time, dtype=float),
+                None if frame_angle is None else np.asarray(frame_angle, dtype=float),
+                None if frame_rpm is None else np.asarray(frame_rpm, dtype=float),
             )
 
         return _load
@@ -191,12 +260,25 @@ def load_project(path: str | Path) -> Project:
         time_entry_s = str(time_entry) if time_entry else None
         phase_entry = row.get("phase_entry")
         phase_entry_s = str(phase_entry) if phase_entry else None
+        frame_time_entry = row.get("frame_time_entry")
+        frame_time_entry_s = str(frame_time_entry) if frame_time_entry else None
+        frame_angle_entry = row.get("frame_angle_entry")
+        frame_angle_entry_s = str(frame_angle_entry) if frame_angle_entry else None
+        frame_rpm_entry = row.get("frame_rpm_entry")
+        frame_rpm_entry_s = str(frame_rpm_entry) if frame_rpm_entry else None
         series = Series.lazy(
             id=sid,
             name=str(row.get("name") or sid),
             sample_rate=float(row.get("sample_rate") or 0.0),
             n_samples=int(row.get("n_samples") or 0),
-            loader=make_loader(data_entry, time_entry_s, phase_entry_s),
+            loader=make_loader(
+                data_entry,
+                time_entry_s,
+                phase_entry_s,
+                frame_time_entry_s,
+                frame_angle_entry_s,
+                frame_rpm_entry_s,
+            ),
             unit=str(row.get("unit") or ""),
             source_id=str(row.get("source_id") or ""),
             source_label=str(row.get("source_label") or ""),

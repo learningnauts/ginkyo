@@ -18,7 +18,7 @@ class LayoutNode:
     kind: str = "leaf"  # leaf | split
     series_ids: list[str] = field(default_factory=list)
     series_colors: dict[str, str] = field(default_factory=dict)
-    # time = single plot; mag_phase = that cell becomes Mag (top) / Phase (bottom)
+    # time = single plot; mag_phase = Mag+Phase split; spectrogram = 2D STFT heatmap
     view_kind: str = "time"
     orientation: str = "horizontal"  # horizontal | vertical
     sizes: list[float] = field(default_factory=lambda: [0.5, 0.5])
@@ -88,7 +88,7 @@ class LayoutNode:
         colors_raw = data.get("series_colors") or {}
         colors = {str(k): str(v) for k, v in dict(colors_raw).items()}
         view_kind = str(data.get("view_kind") or "time")
-        if view_kind not in ("time", "mag_phase"):
+        if view_kind not in ("time", "mag_phase", "spectrogram"):
             view_kind = "time"
         return cls(
             kind="leaf",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import weakref
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -12,10 +13,13 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QActionGroup, QKeyEvent, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QButtonGroup,
     QColorDialog,
     QComboBox,
     QDockWidget,
+    QDoubleSpinBox,
     QFileDialog,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QInputDialog,
@@ -26,8 +30,9 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSplitter,
+    QStackedWidget,
     QStatusBar,
-    QTabBar,
+    QStyleFactory,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -41,7 +46,7 @@ from pyqtgraph.graphicsItems.ViewBox.ViewBoxMenu import ViewBoxMenu
 
 from nagilize.core.dummy import make_sine_with_noise
 from nagilize.core.model import Channel, Recording
-from nagilize.core.project import Project
+from nagilize.core.project import Project, Series
 from nagilize.core.project_io import take_pending_views
 from nagilize.core.spectrum import compute_spectrum
 from nagilize.export.csv_export import export_csv
@@ -76,9 +81,73 @@ _PENS = (
     "#bc6c25",  # brown
 )
 
+
+def _spectrogram_db(magnitude: np.ndarray) -> np.ndarray:
+    return 20.0 * np.log10(np.maximum(np.asarray(magnitude, dtype=np.float64), 1e-12))
+
+
+def _axis_image_extent(axis: np.ndarray) -> tuple[float, float]:
+    """Return (edge0, width) that covers bin centers on a uniform-ish axis."""
+    x = np.asarray(axis, dtype=np.float64).reshape(-1)
+    if x.size == 0:
+        return 0.0, 1.0
+    if x.size == 1:
+        return float(x[0]) - 0.5, 1.0
+    step = float(np.median(np.diff(x)))
+    if not np.isfinite(step) or step <= 0:
+        step = float(x[-1] - x[0]) / max(x.size - 1, 1) or 1.0
+    edge0 = float(x[0]) - step / 2.0
+    width = step * float(x.size)
+    return edge0, width
+
+
+def _nice_db_levels(lo: float, hi: float, *, step: float = 5.0) -> tuple[float, float]:
+    """Round a dB range outward onto a clean step grid."""
+    if not np.isfinite(lo) or not np.isfinite(hi):
+        return -80.0, 0.0
+    if hi < lo:
+        lo, hi = hi, lo
+    step = max(float(step), 1e-6)
+    lo_r = float(math.floor(lo / step) * step)
+    hi_r = float(math.ceil(hi / step) * step)
+    if lo_r >= hi_r:
+        hi_r = lo_r + step
+    return lo_r, hi_r
+
+
+def _colorbar_tick_values(lo: float, hi: float, *, count: int = 9) -> list[float]:
+    """Dense-enough, rounded tick values for a color-bar axis."""
+    if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+        return [float(lo), float(hi)] if hi != lo else [float(lo)]
+    span = float(hi - lo)
+    raw_step = span / max(count - 1, 1)
+    # Prefer 1 / 2 / 5 / 10 … dB steps.
+    exp = math.floor(math.log10(max(raw_step, 1e-9)))
+    base = 10.0 ** exp
+    for mult in (1.0, 2.0, 5.0, 10.0):
+        step = base * mult
+        if step >= raw_step * 0.8:
+            break
+    start = math.ceil(lo / step) * step
+    ticks = [float(lo)]
+    v = start
+    while v < hi - 0.25 * step:
+        if abs(v - lo) > 0.25 * step and abs(v - hi) > 0.25 * step:
+            ticks.append(float(v))
+        v += step
+    ticks.append(float(hi))
+    # Deduplicate while preserving order.
+    out: list[float] = []
+    for t in ticks:
+        if not out or abs(t - out[-1]) > 1e-9:
+            out.append(t)
+    return out
+
+
 _MODE_TIME = "time"
 _MODE_MAG_PHASE = "mag_phase"
 _MODE_REAL_IMAG = "real_imag"
+_VIEW_SPECTROGRAM = "spectrogram"
 
 
 class _NagilizeViewBoxMenu(ViewBoxMenu):
@@ -98,6 +167,25 @@ class _NagilizeViewBoxMenu(ViewBoxMenu):
         self.addSeparator()
         self._series_menu = self.addMenu("Panel series")
         self.aboutToShow.connect(self._rebuild_series_menu)
+        self._spec_scale_act = self.addAction("Spectrogram color scale…")
+        self._spec_scale_act.triggered.connect(self._open_spectrogram_color_scale)
+        self.aboutToShow.connect(self._update_spectrogram_menu_actions)
+        self._spec_y_menu = self.addMenu("Y axis")
+        self._spec_y_time_act = self._spec_y_menu.addAction("Time")
+        self._spec_y_time_act.setCheckable(True)
+        self._spec_y_time_act.triggered.connect(
+            lambda: self._set_spectrogram_y_axis("time")
+        )
+        self._spec_y_angle_act = self._spec_y_menu.addAction("Angle (deg)")
+        self._spec_y_angle_act.setCheckable(True)
+        self._spec_y_angle_act.triggered.connect(
+            lambda: self._set_spectrogram_y_axis("angle")
+        )
+        self._spec_y_rpm_act = self._spec_y_menu.addAction("RPM")
+        self._spec_y_rpm_act.setCheckable(True)
+        self._spec_y_rpm_act.triggered.connect(
+            lambda: self._set_spectrogram_y_axis("rpm")
+        )
         self.addSeparator()
         add_v = self.addAction("Add vertical line here")
         add_v.triggered.connect(lambda: self._call_host("add_marker", vertical=True))
@@ -142,6 +230,64 @@ class _NagilizeViewBoxMenu(ViewBoxMenu):
         clear_act.triggered.connect(
             lambda checked=False, p=panel: host.clear_panel_series(p)
         )
+
+    def _update_spectrogram_menu_actions(self) -> None:
+        host = self._host() if self._host is not None else None
+        is_spec = False
+        has_angle = False
+        has_rpm = False
+        y_axis = "time"
+        if host is not None:
+            panel = host._panel_for_viewbox(self.view())
+            is_spec = panel is not None and panel.is_spectrogram()
+            if is_spec and panel is not None:
+                y_axis = panel.spectrogram_y_axis
+                has_angle = host._panel_has_spectrogram_angle(panel)
+                has_rpm = host._panel_has_spectrogram_rpm(panel)
+        act = getattr(self, "_spec_scale_act", None)
+        if act is not None:
+            act.setVisible(is_spec)
+            act.setEnabled(is_spec)
+        y_menu = getattr(self, "_spec_y_menu", None)
+        if y_menu is not None:
+            y_menu.menuAction().setVisible(is_spec)
+            y_menu.setEnabled(is_spec)
+        time_act = getattr(self, "_spec_y_time_act", None)
+        angle_act = getattr(self, "_spec_y_angle_act", None)
+        rpm_act = getattr(self, "_spec_y_rpm_act", None)
+        if time_act is not None:
+            time_act.setChecked(y_axis == "time")
+            time_act.setEnabled(is_spec)
+        if angle_act is not None:
+            angle_act.setChecked(y_axis == "angle")
+            angle_act.setEnabled(is_spec and has_angle)
+        if rpm_act is not None:
+            rpm_act.setChecked(y_axis == "rpm")
+            rpm_act.setEnabled(is_spec and has_rpm)
+
+    def _set_spectrogram_y_axis(self, axis: str) -> None:
+        host = self._host() if self._host is not None else None
+        if host is None:
+            return
+        panel = host._panel_for_viewbox(self.view())
+        if panel is not None:
+            try:
+                host._active_panel = host._panels.index(panel)
+            except ValueError:
+                pass
+        host.set_spectrogram_y_axis(axis)
+
+    def _open_spectrogram_color_scale(self) -> None:
+        host = self._host() if self._host is not None else None
+        if host is None:
+            return
+        panel = host._panel_for_viewbox(self.view())
+        if panel is not None:
+            try:
+                host._active_panel = host._panels.index(panel)
+            except ValueError:
+                pass
+        host.show_spectrogram_color_scale()
 
     def _call_host(self, method: str, **kwargs) -> None:
         host = self._host() if self._host is not None else None
@@ -309,17 +455,24 @@ class _PlotPanel:
     shell: PanelShell
     v_line: pg.InfiniteLine
     curves: list[pg.PlotDataItem] = field(default_factory=list)
+    image_items: list[pg.ImageItem] = field(default_factory=list)
+    color_bars: list[pg.ColorBarItem] = field(default_factory=list)
+    spectrogram_levels: tuple[float, float] | None = None
+    spectrogram_y_axis: str = "time"  # time | angle | rpm
     series_ids: list[str] = field(default_factory=list)
     series_colors: dict[str, str] = field(default_factory=dict)
-    y_kind: str = "time"  # time | mag | phase | real | imag
+    y_kind: str = "time"  # time | mag | phase | real | imag | spectrogram
     layout_leaf: LayoutNode | None = None
 
     @property
     def widget(self) -> PanelShell:
         return self.shell
 
+    def is_spectrogram(self) -> bool:
+        return self.y_kind == _VIEW_SPECTROGRAM
+
     def is_frequency(self) -> bool:
-        return self.y_kind != "time"
+        return self.y_kind not in ("time", _VIEW_SPECTROGRAM)
 
 
 @dataclass
@@ -417,7 +570,7 @@ class MainWindow(QMainWindow):
         self._project_tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self._project_tree.setToolTip(
             "Drag series onto a plot to add · Shift+drop replaces · "
-            "Right-click plot → Panel series to remove"
+            "Right-click → Add to Analysis / Panel series to remove from plots"
         )
         self._project_tree.itemSelectionChanged.connect(self._on_project_selection)
         self._project_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -438,29 +591,186 @@ class MainWindow(QMainWindow):
         side_wrap.setMinimumWidth(180)
         main_split.addWidget(side_wrap)
 
+        # Workspace shell: Office-like ribbon (Analysis / Views) + stacked content.
+        # View pages stay as a quieter bottom strip inside Views only.
+        workspace = QWidget()
+        workspace_layout = QVBoxLayout(workspace)
+        workspace_layout.setContentsMargins(0, 0, 0, 0)
+        workspace_layout.setSpacing(0)
+
+        ribbon = QFrame()
+        ribbon.setObjectName("RibbonBar")
+        ribbon.setFixedHeight(42)
+        ribbon.setStyleSheet(
+            """
+            QFrame#RibbonBar {
+                background: #f3f2f1;
+                border: none;
+                border-bottom: 1px solid #c8c6c4;
+            }
+            QLabel#RibbonBrand {
+                color: #1f4e79;
+                font-size: 13px;
+                font-weight: 700;
+                padding: 0 14px 0 4px;
+                letter-spacing: 0.2px;
+            }
+            QToolButton#RibbonTab {
+                background: transparent;
+                color: #323130;
+                border: none;
+                border-bottom: 3px solid transparent;
+                padding: 8px 18px 6px 18px;
+                margin: 0 1px;
+                font-size: 12px;
+                font-weight: 500;
+                min-width: 78px;
+            }
+            QToolButton#RibbonTab:hover {
+                background: #e1dfdd;
+                color: #201f1e;
+            }
+            QToolButton#RibbonTab:checked {
+                background: #ffffff;
+                color: #1f4e79;
+                border-bottom: 3px solid #1f4e79;
+                font-weight: 600;
+            }
+            """
+        )
+        ribbon_row = QHBoxLayout(ribbon)
+        ribbon_row.setContentsMargins(10, 0, 10, 0)
+        ribbon_row.setSpacing(0)
+        brand = QLabel("nagilize")
+        brand.setObjectName("RibbonBrand")
+        ribbon_row.addWidget(brand)
+
+        self._ribbon_analysis_btn = QToolButton()
+        self._ribbon_analysis_btn.setObjectName("RibbonTab")
+        self._ribbon_analysis_btn.setText("Analysis")
+        self._ribbon_analysis_btn.setCheckable(True)
+        self._ribbon_analysis_btn.setAutoExclusive(True)
+        self._ribbon_analysis_btn.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonTextOnly
+        )
+        self._ribbon_views_btn = QToolButton()
+        self._ribbon_views_btn.setObjectName("RibbonTab")
+        self._ribbon_views_btn.setText("Views")
+        self._ribbon_views_btn.setCheckable(True)
+        self._ribbon_views_btn.setAutoExclusive(True)
+        self._ribbon_views_btn.setChecked(True)
+        self._ribbon_views_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self._ribbon_group = QButtonGroup(self)
+        self._ribbon_group.setExclusive(True)
+        self._ribbon_group.addButton(self._ribbon_analysis_btn, 0)
+        self._ribbon_group.addButton(self._ribbon_views_btn, 1)
+        self._ribbon_group.idClicked.connect(self._set_workspace_mode)
+        ribbon_row.addWidget(self._ribbon_analysis_btn)
+        ribbon_row.addWidget(self._ribbon_views_btn)
+        ribbon_row.addStretch(1)
+        workspace_layout.addWidget(ribbon)
+
+        self._workspace_stack = QStackedWidget()
+        self._analysis_page = AnalysisPage(
+            get_project=lambda: self._project,
+            get_project_selection=lambda: self._project_tree.selected_series_ids(),
+            on_result=self._on_spectrum_result,
+        )
+        self._workspace_stack.addWidget(self._analysis_page)
+
+        views_host = QWidget()
+        views_layout = QVBoxLayout(views_host)
+        views_layout.setContentsMargins(0, 0, 0, 0)
+        views_layout.setSpacing(0)
         self._tabs = QTabWidget()
-        self._tabs.setDocumentMode(True)
+        self._tabs.setObjectName("ViewPageTabs")
+        self._tabs.setDocumentMode(False)
         self._tabs.setTabsClosable(True)
-        self._tabs.setMovable(False)
+        self._tabs.setMovable(True)
+        self._tabs.setTabPosition(QTabWidget.TabPosition.South)
+        # Excel-like sheet strip: left-aligned chips, never elide "Page 1".
+        page_bar = self._tabs.tabBar()
+        page_bar.setExpanding(False)
+        page_bar.setElideMode(Qt.TextElideMode.ElideNone)
+        page_bar.setUsesScrollButtons(True)
+        # Native styles (esp. macOS) may center tabs; Fusion packs them left.
+        fusion = QStyleFactory.create("Fusion")
+        if fusion is not None:
+            page_bar.setStyle(fusion)
+        self._tabs.setStyleSheet(
+            """
+            QTabWidget#ViewPageTabs::pane {
+                border: none;
+                border-bottom: 1px solid #b1b1b1;
+                background: #ffffff;
+            }
+            QTabWidget#ViewPageTabs > QTabBar {
+                background: #e6e6e6;
+                border-top: 1px solid #b1b1b1;
+                min-height: 28px;
+                alignment: left;
+            }
+            QTabWidget#ViewPageTabs > QTabBar::tab {
+                background: #d4d4d4;
+                color: #333333;
+                border: 1px solid #a6a6a6;
+                border-top: none;
+                border-bottom-left-radius: 3px;
+                border-bottom-right-radius: 3px;
+                padding: 5px 16px 5px 14px;
+                margin: 0 1px 0 0;
+                min-width: 88px;
+                font-size: 12px;
+                font-weight: 400;
+            }
+            QTabWidget#ViewPageTabs > QTabBar::tab:selected {
+                background: #ffffff;
+                color: #1f4e79;
+                border-color: #8a8a8a;
+                border-top: 1px solid #ffffff;
+                margin-top: -1px;
+                padding-top: 6px;
+                font-weight: 600;
+            }
+            QTabWidget#ViewPageTabs > QTabBar::tab:hover:!selected {
+                background: #cfcfcf;
+                color: #201f1e;
+            }
+            QTabWidget#ViewPageTabs > QTabBar::close-button {
+                subcontrol-position: right;
+                padding: 1px;
+            }
+            QTabWidget#ViewPageTabs QToolButton {
+                background: #d4d4d4;
+                border: 1px solid #a6a6a6;
+                border-radius: 2px;
+                color: #333333;
+                padding: 3px 10px;
+                margin: 2px 4px;
+                font-size: 14px;
+                font-weight: 600;
+            }
+            QTabWidget#ViewPageTabs QToolButton:hover {
+                background: #ffffff;
+                color: #1f4e79;
+                border-color: #1f4e79;
+            }
+            """
+        )
         self._tabs.currentChanged.connect(self._on_tab_changed)
         self._tabs.tabCloseRequested.connect(self._close_view_page)
         self._tabs.tabBarDoubleClicked.connect(self._rename_view_page)
         add_page_btn = QToolButton(self._tabs)
         add_page_btn.setText("+")
-        add_page_btn.setToolTip("New page")
+        add_page_btn.setToolTip("New view page")
         add_page_btn.clicked.connect(self._new_view_page)
-        self._tabs.setCornerWidget(add_page_btn, Qt.Corner.TopRightCorner)
-        self._analysis_page = AnalysisPage(
-            get_project=lambda: self._project,
-            on_result=self._on_spectrum_result,
-        )
-        self._tabs.addTab(self._analysis_page, "Analysis")
-        # Analysis tab is not closable.
-        self._tabs.tabBar().setTabButton(0, QTabBar.ButtonPosition.LeftSide, None)
-        self._tabs.tabBar().setTabButton(0, QTabBar.ButtonPosition.RightSide, None)
+        self._tabs.setCornerWidget(add_page_btn, Qt.Corner.BottomRightCorner)
         self._tabs.addTab(self._make_page_host(), self._pages[0].title)
-        self._tabs.setCurrentIndex(1)
-        main_split.addWidget(self._tabs)
+        views_layout.addWidget(self._tabs)
+        self._workspace_stack.addWidget(views_host)
+        self._workspace_stack.setCurrentIndex(1)
+        workspace_layout.addWidget(self._workspace_stack, stretch=1)
+        main_split.addWidget(workspace)
         main_split.setStretchFactor(0, 0)
         main_split.setStretchFactor(1, 1)
         main_split.setSizes([320, 880])
@@ -474,6 +784,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         self.setStatusBar(QStatusBar(self))
         self._build_cursor_dock()
+        self._build_spectrogram_dock()
         self._build_menu()
         self._rebuild_panels()
         self.add_recording(make_sine_with_noise(), reset_layout=True)
@@ -505,24 +816,117 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
         self._cursor_dock = dock
 
-    # --- view pages (tabs) -----------------------------------------------
+    def _build_spectrogram_dock(self) -> None:
+        dock = QDockWidget("Spectrogram color scale", self)
+        dock.setObjectName("SpectrogramScaleDock")
+        dock.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea
+            | Qt.DockWidgetArea.RightDockWidgetArea
+            | Qt.DockWidgetArea.BottomDockWidgetArea
+            | Qt.DockWidgetArea.TopDockWidgetArea
+        )
+        body = QWidget()
+        layout = QVBoxLayout(body)
+        hint = QLabel(
+            "Z-axis (dB) for the active spectrogram panel. "
+            "Set Min / Max, or drag the color-bar handles. "
+            "Color map: right-click the color bar."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #444;")
+        layout.addWidget(hint)
+        self._spec_scale_status = QLabel("No spectrogram panel selected")
+        self._spec_scale_status.setStyleSheet("color: #666;")
+        layout.addWidget(self._spec_scale_status)
 
-    def _is_analysis_tab(self, tab_index: int) -> bool:
-        return tab_index == 0
+        min_row = QHBoxLayout()
+        min_row.addWidget(QLabel("Min dB"))
+        self._spec_db_min_spin = QDoubleSpinBox()
+        self._spec_db_min_spin.setRange(-300.0, 300.0)
+        self._spec_db_min_spin.setDecimals(1)
+        self._spec_db_min_spin.setSingleStep(2.0)
+        self._spec_db_min_spin.setValue(-80.0)
+        self._spec_db_min_spin.setToolTip("Lower end of the color scale (Z min)")
+        self._spec_db_min_spin.valueChanged.connect(self._on_spec_levels_changed)
+        min_row.addWidget(self._spec_db_min_spin)
+        layout.addLayout(min_row)
 
-    def _page_index_from_tab(self, tab_index: int) -> int | None:
-        if tab_index <= 0:
-            return None
-        return tab_index - 1
+        max_row = QHBoxLayout()
+        max_row.addWidget(QLabel("Max dB"))
+        self._spec_db_max_spin = QDoubleSpinBox()
+        self._spec_db_max_spin.setRange(-300.0, 300.0)
+        self._spec_db_max_spin.setDecimals(1)
+        self._spec_db_max_spin.setSingleStep(2.0)
+        self._spec_db_max_spin.setValue(0.0)
+        self._spec_db_max_spin.setToolTip("Upper end of the color scale (Z max)")
+        self._spec_db_max_spin.valueChanged.connect(self._on_spec_levels_changed)
+        max_row.addWidget(self._spec_db_max_spin)
+        layout.addLayout(max_row)
 
-    def _tab_index_from_page(self, page_index: int) -> int:
-        return page_index + 1
+        btn_row = QHBoxLayout()
+        auto_btn = QPushButton("Auto")
+        auto_btn.setToolTip("Set Min / Max from data")
+        auto_btn.clicked.connect(self._auto_spectrogram_levels)
+        btn_row.addWidget(auto_btn)
+        btn_row.addStretch(1)
+        layout.addLayout(btn_row)
+        layout.addStretch(1)
+
+        dock.setWidget(body)
+        dock.setFloating(True)
+        dock.hide()
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+        self._spectrogram_dock = dock
+        self._spec_scale_widgets = (
+            self._spec_db_min_spin,
+            self._spec_db_max_spin,
+            auto_btn,
+        )
+        self._updating_spec_dock = False
+
+    # --- workspace mode + view pages -------------------------------------
+
+    def _is_views_mode(self) -> bool:
+        return self._workspace_stack.currentIndex() == 1
+
+    def _set_workspace_mode(self, index: int) -> None:
+        index = int(index)
+        if index == self._workspace_stack.currentIndex():
+            return
+        if index == 0:
+            # Leaving Views: stash the live plot page.
+            if 0 <= self._page_index < len(self._pages):
+                self._stash_live_to_page(self._page_index)
+            self._workspace_stack.setCurrentIndex(0)
+            self._ribbon_analysis_btn.setChecked(True)
+            self._analysis_page.refresh_series()
+            return
+
+        self._workspace_stack.setCurrentIndex(1)
+        self._ribbon_views_btn.setChecked(True)
+        # Entering Views: ensure current page is active.
+        if 0 <= self._page_index < len(self._pages):
+            page = self._pages[self._page_index]
+            if not page.built or page.root_plot_widget is None:
+                self._activate_page(self._page_index)
+            else:
+                self._panels = page.panels
+                self._synced_markers = page.synced_markers
+                self._selected_marker = page.selected_marker
+                self._active_panel = page.active_panel
+                self._root_plot_widget = page.root_plot_widget
+                self._node_widgets = page.node_widgets
+                self._mouse_proxies = page.mouse_proxies
+                self._workspace = page.workspace
+                self._display_mode = page.display_mode
+
+    def _on_mode_changed(self, index: int) -> None:
+        self._set_workspace_mode(index)
 
     def _plot_host_for_page(self, page_index: int) -> QWidget | None:
-        tab = self._tab_index_from_page(page_index)
-        if tab < 0 or tab >= self._tabs.count():
+        if page_index < 0 or page_index >= self._tabs.count():
             return None
-        return self._tabs.widget(tab)
+        return self._tabs.widget(page_index)
 
     def _make_page_host(self) -> QWidget:
         host = QWidget()
@@ -544,9 +948,8 @@ class MainWindow(QMainWindow):
         self._sync_workspace_from_panels()
         page = self._pages[index]
         page.display_mode = self._display_mode
-        tab = self._tab_index_from_page(index)
-        if 0 <= tab < self._tabs.count():
-            page.title = self._tabs.tabText(tab)
+        if 0 <= index < self._tabs.count():
+            page.title = self._tabs.tabText(index)
         page.panels = self._panels
         page.synced_markers = self._synced_markers
         page.selected_marker = self._selected_marker
@@ -655,34 +1058,65 @@ class MainWindow(QMainWindow):
     def _on_tab_changed(self, index: int) -> None:
         if self._suppress_tab_change or index < 0:
             return
-        page_index = self._page_index_from_tab(index)
-        if page_index is None:
-            if 0 <= self._page_index < len(self._pages):
-                self._stash_live_to_page(self._page_index)
-            self._analysis_page.refresh_series()
-            return
         old = self._page_index
-        if old == page_index and self._tabs.currentIndex() == self._tab_index_from_page(old):
+        if old == index:
             return
         if 0 <= old < len(self._pages):
             self._stash_live_to_page(old)
-        self._activate_page(page_index)
+        self._activate_page(index)
 
     def _show_analysis_page(self) -> None:
-        self._tabs.setCurrentIndex(0)
-        self._analysis_page.refresh_series()
+        self._set_workspace_mode(0)
 
-    def _on_spectrum_result(self, series_id: str) -> None:
+    def _show_views_workspace(self) -> None:
+        self._set_workspace_mode(1)
+
+    def _close_current_view_page(self) -> None:
+        self._show_views_workspace()
+        self._close_view_page(self._tabs.currentIndex())
+
+    def _rename_current_view_page(self) -> None:
+        self._show_views_workspace()
+        self._rename_view_page(self._tabs.currentIndex())
+
+    def _on_spectrum_result(self, result: str | list[str]) -> None:
         self._refresh_project_tree()
         self._analysis_page.refresh_series()
-        series = self._project.get(series_id)
-        name = series.name if series is not None else series_id
-        self.statusBar().showMessage(
-            f"Added spectrum “{name}” — drag it onto a plot cell for Mag+Phase",
-            6000,
-        )
+        ids = result if isinstance(result, list) else [result]
+        if not ids:
+            return
+        first = self._project.get(ids[0])
+        dataset = first.source_label if first is not None else "FFT result"
+        if len(ids) == 1:
+            name = first.name if first is not None else ids[0]
+            msg = f"Created “{dataset}” / {name} — switch to Views to plot"
+        else:
+            msg = (
+                f"Created dataset “{dataset}” ({len(ids)} spectra)"
+                " — switch to Views to plot"
+            )
+        saved = self._autosave_project_if_path_known()
+        if saved:
+            msg += f" · saved {self._project.path.name}"
+        self.statusBar().showMessage(msg, 6000)
+
+    def _autosave_project_if_path_known(self) -> bool:
+        """Save in place when the project already has a .nagproj path. New projects skip."""
+        if self._project.path is None:
+            return False
+        try:
+            self._project.save(views=self._serialize_views())
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(
+                self,
+                "Auto-save after analysis failed",
+                f"Analysis results are in memory, but saving failed:\n{exc}",
+            )
+            return False
+        return True
 
     def _new_view_page(self) -> None:
+        self._show_views_workspace()
         if 0 <= self._page_index < len(self._pages):
             self._stash_live_to_page(self._page_index)
         n = len(self._pages) + 1
@@ -697,22 +1131,15 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"New page: {page.title}", 3000)
 
     def _close_view_page(self, index: int) -> None:
-        if self._is_analysis_tab(index):
-            return
-        page_index = self._page_index_from_tab(index)
-        if page_index is None:
-            return
         if len(self._pages) <= 1:
             self.statusBar().showMessage("Cannot close the last page", 3000)
             return
-        if page_index < 0 or page_index >= len(self._pages):
+        if index < 0 or index >= len(self._pages):
             return
-        closing_current = page_index == self._page_index and not self._is_analysis_tab(
-            self._tabs.currentIndex()
-        )
+        closing_current = index == self._page_index
         if closing_current:
-            self._stash_live_to_page(page_index)
-        page = self._pages[page_index]
+            self._stash_live_to_page(index)
+        page = self._pages[index]
         if closing_current:
             # MainWindow still holds the same lists; clear without double-free.
             self._clear_live_refs()
@@ -731,34 +1158,28 @@ class MainWindow(QMainWindow):
 
         self._suppress_tab_change = True
         self._tabs.removeTab(index)
-        del self._pages[page_index]
-        if self._page_index > page_index:
+        del self._pages[index]
+        if self._page_index > index:
             self._page_index -= 1
-        elif self._page_index == page_index:
-            self._page_index = min(page_index, len(self._pages) - 1)
-        new_tab = self._tabs.currentIndex()
+        elif self._page_index == index:
+            self._page_index = min(index, len(self._pages) - 1)
+        new_index = self._tabs.currentIndex()
         self._suppress_tab_change = False
-        new_page = self._page_index_from_tab(new_tab)
         if closing_current:
-            if new_page is None:
-                self._tabs.setCurrentIndex(self._tab_index_from_page(self._page_index))
-                self._activate_page(self._page_index)
-            else:
-                self._activate_page(new_page)
-        elif new_page is not None and new_page != self._page_index:
-            self._page_index = new_page
+            self._activate_page(new_index)
+        elif new_index != self._page_index:
+            self._page_index = new_index
         self.statusBar().showMessage("Page closed", 3000)
 
     def _rename_view_page(self, index: int) -> None:
-        page_index = self._page_index_from_tab(index)
-        if page_index is None or page_index < 0 or page_index >= len(self._pages):
+        if index < 0 or index >= len(self._pages):
             return
         current = self._tabs.tabText(index)
         text, ok = QInputDialog.getText(self, "Rename page", "Page name:", text=current)
         if not ok:
             return
         name = text.strip() or current
-        self._pages[page_index].title = name
+        self._pages[index].title = name
         self._tabs.setTabText(index, name)
 
     # --- panels / layout -------------------------------------------------
@@ -898,6 +1319,10 @@ class MainWindow(QMainWindow):
     def _view_kind_for_series_ids(self, series_ids: list[str]) -> str:
         for sid in series_ids:
             series = self._project.get(sid)
+            if series is not None and series.is_spectrogram():
+                return _VIEW_SPECTROGRAM
+        for sid in series_ids:
+            series = self._project.get(sid)
             if series is not None and series.is_spectrum():
                 return "mag_phase"
         return "time"
@@ -938,7 +1363,11 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             ("Replaced" if replace else "Added")
             + f" {len(valid)} series on panel {idx + 1}"
-            + (" → Mag+Phase" if new_kind == "mag_phase" else ""),
+            + (
+                " → Spectrogram"
+                if new_kind == _VIEW_SPECTROGRAM
+                else (" → Mag+Phase" if new_kind == "mag_phase" else "")
+            ),
             3000,
         )
 
@@ -949,7 +1378,7 @@ class MainWindow(QMainWindow):
         return None
 
     def _update_active_panel_label(self) -> None:
-        return
+        self._refresh_spectrogram_dock()
 
     def _tear_down_plots(self, host: QWidget | None) -> None:
         self.clear_markers()
@@ -1069,6 +1498,18 @@ class MainWindow(QMainWindow):
                 leaf_counter[0] += 1
                 return splitter
 
+            if y_kinds is None and (node.view_kind or "time") == _VIEW_SPECTROGRAM:
+                panel = self._make_leaf_panel(
+                    series_ids=list(node.series_ids),
+                    series_colors=dict(node.series_colors),
+                    y_kind=_VIEW_SPECTROGRAM,
+                    layout_leaf=node,
+                )
+                self._panels.append(panel)
+                self._node_widgets.append((node, panel.shell))
+                leaf_counter[0] += 1
+                return panel.shell
+
             idx = leaf_counter[0]
             leaf_counter[0] += 1
             if y_kinds is not None and idx < len(y_kinds):
@@ -1151,7 +1592,7 @@ class MainWindow(QMainWindow):
             layout_leaf=layout_leaf,
         )
         shell.panel_ref = panel
-        shell.set_edge_buttons_enabled(y_kind == "time")
+        shell.set_edge_buttons_enabled(y_kind in ("time", _VIEW_SPECTROGRAM))
         return panel
 
     def _wire_mouse_proxies(self) -> None:
@@ -1273,14 +1714,10 @@ class MainWindow(QMainWindow):
         view_menu.addAction(new_page_act)
         close_page_act = QAction("Close page", self)
         close_page_act.setShortcut("Ctrl+W")
-        close_page_act.triggered.connect(
-            lambda: self._close_view_page(self._tabs.currentIndex())
-        )
+        close_page_act.triggered.connect(self._close_current_view_page)
         view_menu.addAction(close_page_act)
         rename_page_act = QAction("Rename page…", self)
-        rename_page_act.triggered.connect(
-            lambda: self._rename_view_page(self._tabs.currentIndex())
-        )
+        rename_page_act.triggered.connect(self._rename_current_view_page)
         view_menu.addAction(rename_page_act)
         view_menu.addSeparator()
 
@@ -1290,6 +1727,13 @@ class MainWindow(QMainWindow):
         cursor_dock_act.toggled.connect(self._toggle_cursor_dock)
         view_menu.addAction(cursor_dock_act)
         self._cursor_dock_action = cursor_dock_act
+
+        spec_dock_act = QAction("Spectrogram color scale", self)
+        spec_dock_act.setCheckable(True)
+        spec_dock_act.setChecked(False)
+        spec_dock_act.toggled.connect(self._toggle_spectrogram_dock)
+        view_menu.addAction(spec_dock_act)
+        self._spectrogram_dock_action = spec_dock_act
         view_menu.addSeparator()
 
         reset_act = QAction("Reset zoom", self)
@@ -1373,6 +1817,12 @@ class MainWindow(QMainWindow):
         if visible:
             self._cursor_dock.raise_()
 
+    def _toggle_spectrogram_dock(self, visible: bool) -> None:
+        self._spectrogram_dock.setVisible(visible)
+        if visible:
+            self._spectrogram_dock.raise_()
+            self._refresh_spectrogram_dock()
+
     def open_project_dialog(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self,
@@ -1451,15 +1901,14 @@ class MainWindow(QMainWindow):
         return views
 
     def _load_project_into_window(self, project: Project) -> None:
-        # Tear down all page widgets (keep Analysis tab at index 0).
+        # Tear down all view-page widgets (Analysis lives in the outer mode tab).
         self._suppress_tab_change = True
         for i in range(len(self._pages) - 1, -1, -1):
             page = self._pages[i]
             if page.built and page.root_plot_widget is not None:
                 self._destroy_page_runtime(page)
-            tab = self._tab_index_from_page(i)
-            if 0 <= tab < self._tabs.count():
-                self._tabs.removeTab(tab)
+            if 0 <= i < self._tabs.count():
+                self._tabs.removeTab(i)
         self._pages.clear()
         self._clear_live_refs()
         self._suppress_tab_change = False
@@ -1487,10 +1936,11 @@ class MainWindow(QMainWindow):
             except Exception:  # noqa: BLE001
                 workspace = WorkspaceLayout()
             workspace.prune_series(project.prune_ids)
-            # Infer mag_phase leaf from assigned spectrum results.
+            # Infer leaf view_kind from assigned analysis results.
             for leaf in workspace.leaves():
-                if self._view_kind_for_series_ids(leaf.series_ids) == "mag_phase":
-                    leaf.view_kind = "mag_phase"
+                kind = self._view_kind_for_series_ids(leaf.series_ids)
+                if kind != "time":
+                    leaf.view_kind = kind
             mode = str(raw.get("display_mode") or _MODE_TIME)
             if mode not in self._spectrum_actions:
                 mode = _MODE_TIME
@@ -1507,8 +1957,9 @@ class MainWindow(QMainWindow):
             )
             self._pages.append(page)
             self._tabs.addTab(self._make_page_host(), title)
-        self._tabs.setCurrentIndex(1 if self._pages else 0)
+        self._tabs.setCurrentIndex(0)
         self._suppress_tab_change = False
+        self._show_views_workspace()
         if self._pages:
             self._activate_page(0)
         self._analysis_page.refresh_series()
@@ -1674,14 +2125,35 @@ class MainWindow(QMainWindow):
         item = self._project_tree.itemAt(pos)
         if item is None:
             return
-        sid = item.data(0, ROLE_SERIES)
-        if not sid:
+        ids = self._project_tree.selected_series_ids()
+        if not ids and item.data(0, ROLE_SERIES):
+            ids = [str(item.data(0, ROLE_SERIES))]
+        if not ids:
             return
         menu = QMenu(self)
-        edit = menu.addAction("Edit series metadata…")
+        add_analysis = menu.addAction("Add to Analysis…")
+        edit = None
+        if len(ids) == 1:
+            edit = menu.addAction("Edit series metadata…")
         chosen = menu.exec(self._project_tree.viewport().mapToGlobal(pos))
-        if chosen is edit:
-            self._edit_series_meta(str(sid))
+        if chosen is add_analysis:
+            self._add_selection_to_analysis(ids)
+        elif edit is not None and chosen is edit:
+            self._edit_series_meta(ids[0])
+
+    def _add_selection_to_analysis(self, series_ids: list[str] | None = None) -> None:
+        ids = series_ids if series_ids is not None else self._project_tree.selected_series_ids()
+        added = self._analysis_page.add_series_ids(ids)
+        self._show_analysis_page()
+        if added:
+            self.statusBar().showMessage(
+                f"Added {added} series to Analysis set", 4000
+            )
+        else:
+            self.statusBar().showMessage(
+                "Nothing new added to Analysis (already listed or not a time series)",
+                4000,
+            )
 
     def _edit_series_meta(self, series_id: str) -> None:
         series = self._project.get(series_id)
@@ -1852,7 +2324,7 @@ class MainWindow(QMainWindow):
                     angle=90,
                     movable=True,
                     pen=pg.mkPen("#c0392b", width=1.5, style=Qt.PenStyle.DashLine),
-                    label=self._vertical_marker_format(),
+                    label="{value:.6g}",
                     labelOpts={
                         "position": 0.92,
                         "color": "#c0392b",
@@ -1868,7 +2340,7 @@ class MainWindow(QMainWindow):
                     angle=0,
                     movable=True,
                     pen=pg.mkPen("#2980b9", width=1.5, style=Qt.PenStyle.DashLine),
-                    label="y={value:.6g}",
+                    label="{value:.6g}",
                     labelOpts={
                         "position": 0.92,
                         "color": "#2980b9",
@@ -2074,14 +2546,12 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, title, f"Invalid number: {text!r}")
             return None
 
-    def _vertical_marker_format(self) -> str:
-        return "f={value:.6g}" if self._spectrum_mode() else "t={value:.6g}"
+    def _marker_label_format(self) -> str:
+        return "{value:.6g}"
 
     def _sync_marker_labels(self) -> None:
-        fmt = self._vertical_marker_format()
+        fmt = self._marker_label_format()
         for group in self._synced_markers:
-            if not group.vertical:
-                continue
             for line in group.lines:
                 label = getattr(line, "label", None)
                 if label is not None and hasattr(label, "setFormat"):
@@ -2131,6 +2601,10 @@ class MainWindow(QMainWindow):
             for curve in panel.curves:
                 panel.plot.removeItem(curve)
             panel.curves.clear()
+            for image in panel.image_items:
+                panel.plot.removeItem(image)
+            panel.image_items.clear()
+            self._clear_panel_colorbars(panel)
             panel.plot.legend = None
             panel.plot.addLegend()
             if panel.v_line.scene() is None:
@@ -2143,7 +2617,9 @@ class MainWindow(QMainWindow):
             self._draw_spectrum_panels()
         else:
             for i, panel in enumerate(self._panels):
-                if panel.is_frequency():
+                if panel.is_spectrogram():
+                    self._draw_spectrogram_panel(panel, i)
+                elif panel.is_frequency():
                     self._draw_frequency_panel(panel)
                 else:
                     self._draw_time_panel(panel, i)
@@ -2158,6 +2634,8 @@ class MainWindow(QMainWindow):
                 vb.setRange(xRange=rng[0], yRange=rng[1], padding=0)
                 vb.disableAutoRange()
 
+        self._refresh_spectrogram_dock()
+
     def _draw_time_panels(self) -> None:
         for i, panel in enumerate(self._panels):
             self._draw_time_panel(panel, i)
@@ -2167,7 +2645,7 @@ class MainWindow(QMainWindow):
             s.unit
             for sid in panel.series_ids
             for s in [self._project.get(sid)]
-            if s is not None and s.unit and not s.is_spectrum()
+            if s is not None and s.unit and not s.is_fft_result()
         }
         left = "Amplitude"
         if len(units) == 1:
@@ -2183,6 +2661,8 @@ class MainWindow(QMainWindow):
         for sid in ids:
             series = self._project.get(sid)
             if series is None:
+                continue
+            if series.is_spectrogram():
                 continue
             names.append(series.display_name)
             color = self._color_for_panel_series(panel, sid)
@@ -2204,6 +2684,307 @@ class MainWindow(QMainWindow):
             panel.curves.append(curve)
         panel.plot.setTitle(", ".join(names) if names else f"Panel {index + 1}")
 
+    def _draw_spectrogram_panel(self, panel: _PlotPanel, index: int) -> None:
+        y_mode = panel.spectrogram_y_axis
+        if y_mode == "angle" and not self._panel_has_spectrogram_angle(panel):
+            panel.spectrogram_y_axis = "time"
+            y_mode = "time"
+        elif y_mode == "rpm" and not self._panel_has_spectrogram_rpm(panel):
+            panel.spectrogram_y_axis = "time"
+            y_mode = "time"
+        panel.plot.setLabel("bottom", "Frequency", units="Hz")
+        if y_mode == "angle":
+            panel.plot.setLabel("left", "Angle", units="deg")
+        elif y_mode == "rpm":
+            panel.plot.setLabel("left", "RPM", units="")
+        else:
+            panel.plot.setLabel("left", "Time", units="s")
+        ids = panel.series_ids
+        if not ids:
+            panel.plot.setTitle(f"Panel {index + 1} (empty)")
+            return
+
+        names: list[str] = []
+        images: list[pg.ImageItem] = []
+        levels = panel.spectrogram_levels
+        if levels is None:
+            levels = self._spectrogram_levels_for_panel_data(panel)
+
+        for sid in ids:
+            series = self._project.get(sid)
+            if series is None or not series.is_spectrogram():
+                continue
+            series.ensure_loaded()
+            y_axis = self._spectrogram_y_values(series, y_mode=y_mode)
+            freq = series.time
+            mag = series.data
+            if (
+                y_axis is None
+                or freq is None
+                or mag is None
+                or mag.ndim != 2
+                or mag.size == 0
+            ):
+                continue
+            names.append(series.display_name)
+            display = _spectrogram_db(mag)  # (freq, y) → x=freq, y=time/angle/rpm
+            image = pg.ImageItem()
+            if levels is not None:
+                image.setImage(display, autoLevels=False, levels=list(levels))
+            else:
+                image.setImage(display, autoLevels=True)
+            image.setColorMap("viridis")
+            f0, fw = _axis_image_extent(freq)
+            y0, yh = _axis_image_extent(y_axis)
+            image.setRect(f0, y0, fw, yh)
+            image.setZValue(-10)
+            panel.plot.addItem(image)
+            panel.image_items.append(image)
+            images.append(image)
+
+        if images:
+            bar_kwargs: dict = {
+                "colorMap": "viridis",
+                "label": "dB",
+                "interactive": True,
+                "rounding": 2,  # snap drag adjustments to 2 dB
+            }
+            if levels is not None:
+                bar_kwargs["values"] = levels
+            # One color bar for the whole panel (avoids stacked overlapping bars).
+            bar = panel.plot.addColorBar(images, **bar_kwargs)
+            self._style_spectrogram_colorbar(bar, levels)
+            self._connect_spectrogram_colorbar(panel, bar)
+            panel.color_bars.append(bar)
+
+        title = ", ".join(names) if names else f"Panel {index + 1}"
+        if len(names) < len(ids):
+            title = title + " (non-spectrogram series skipped)"
+        panel.plot.setTitle(title)
+
+    def _spectrogram_y_values(
+        self, series: Series, *, y_mode: str
+    ) -> np.ndarray | None:
+        if y_mode == "angle":
+            angles = series.frame_angle_deg
+            if angles is not None and np.asarray(angles).size:
+                return np.asarray(angles, dtype=np.float64)
+            return None
+        if y_mode == "rpm":
+            rpms = series.frame_rpm
+            if rpms is not None and np.asarray(rpms).size:
+                return np.asarray(rpms, dtype=np.float64)
+            return None
+        times = series.frame_time_s
+        if times is None:
+            return None
+        return np.asarray(times, dtype=np.float64)
+
+    def _panel_has_spectrogram_angle(self, panel: _PlotPanel) -> bool:
+        for sid in panel.series_ids:
+            series = self._project.get(sid)
+            if series is None or not series.is_spectrogram():
+                continue
+            series.ensure_loaded()
+            angles = series.frame_angle_deg
+            if angles is not None and np.asarray(angles).size:
+                return True
+        return False
+
+    def _panel_has_spectrogram_rpm(self, panel: _PlotPanel) -> bool:
+        for sid in panel.series_ids:
+            series = self._project.get(sid)
+            if series is None or not series.is_spectrogram():
+                continue
+            series.ensure_loaded()
+            rpms = series.frame_rpm
+            if rpms is not None and np.asarray(rpms).size:
+                return True
+        return False
+
+    def set_spectrogram_y_axis(self, axis: str) -> None:
+        """Switch spectrogram panel Y axis between time, angle, and RPM."""
+        panel = self._active_cursor_panel()
+        if panel is None or not panel.is_spectrogram():
+            return
+        if axis == "angle" and not self._panel_has_spectrogram_angle(panel):
+            return
+        if axis == "rpm" and not self._panel_has_spectrogram_rpm(panel):
+            return
+        if axis in ("angle", "rpm"):
+            panel.spectrogram_y_axis = axis
+        else:
+            panel.spectrogram_y_axis = "time"
+        self._redraw_curves(fit=True)
+        self._refresh_cursor_values_panel()
+
+    def _clear_panel_colorbars(self, panel: _PlotPanel) -> None:
+        """Remove color bars from the plot layout (prevents stacked ghost bars)."""
+        layout = panel.plot.layout
+        for bar in list(panel.color_bars):
+            try:
+                layout.removeItem(bar)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                bar.setParentItem(None)
+            except Exception:  # noqa: BLE001
+                pass
+        panel.color_bars.clear()
+        # Sweep leftovers from previous redraws (same layout cell stacking).
+        leftovers: list = []
+        try:
+            for item in layout.items.keys():  # type: ignore[attr-defined]
+                if isinstance(item, pg.ColorBarItem):
+                    leftovers.append(item)
+        except Exception:  # noqa: BLE001
+            leftovers = []
+        for item in leftovers:
+            try:
+                layout.removeItem(item)
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            layout.setColumnFixedWidth(4, 0)
+            layout.setColumnFixedWidth(5, 0)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _spectrogram_levels_for_panel_data(
+        self, panel: _PlotPanel
+    ) -> tuple[float, float] | None:
+        mins: list[float] = []
+        maxs: list[float] = []
+        for sid in panel.series_ids:
+            series = self._project.get(sid)
+            if series is None or not series.is_spectrogram():
+                continue
+            series.ensure_loaded()
+            mag = series.data
+            if mag is None or mag.ndim != 2 or mag.size == 0:
+                continue
+            db = _spectrogram_db(mag)
+            mins.append(float(np.min(db)))
+            maxs.append(float(np.max(db)))
+        if not mins:
+            return None
+        return _nice_db_levels(float(min(mins)), float(max(maxs)))
+
+    def _displayed_spectrogram_levels(
+        self, panel: _PlotPanel
+    ) -> tuple[float, float] | None:
+        if panel.spectrogram_levels is not None:
+            return panel.spectrogram_levels
+        if panel.color_bars:
+            lo, hi = panel.color_bars[0].levels()
+            return float(lo), float(hi)
+        return self._spectrogram_levels_for_panel_data(panel)
+
+    def _style_spectrogram_colorbar(
+        self, bar: pg.ColorBarItem, levels: tuple[float, float] | None
+    ) -> None:
+        """Keep color-bar value labels readable (avoid overlapping auto-ticks)."""
+        axis = getattr(bar, "axis", None)
+        if axis is None:
+            return
+        axis.setWidth(56)
+        # Prefer pyqtgraph auto ticks, but limit density via style.
+        axis.setStyle(tickTextOffset=4, autoExpandTextSpace=True)
+        if levels is None:
+            lo, hi = bar.levels()
+        else:
+            lo, hi = levels
+        ticks = _colorbar_tick_values(float(lo), float(hi), count=9)
+        axis.setTicks([[(v, f"{v:g}") for v in ticks], []])
+
+    def _refresh_spectrogram_dock(self) -> None:
+        panel = self._active_cursor_panel()
+        enabled = panel is not None and panel.is_spectrogram()
+        for widget in self._spec_scale_widgets:
+            widget.setEnabled(enabled)
+        if not enabled:
+            self._spec_scale_status.setText("No spectrogram panel selected")
+            return
+        levels = self._displayed_spectrogram_levels(panel)
+        if levels is None:
+            self._spec_scale_status.setText("Auto (no data)")
+            return
+        lo, hi = levels
+        auto = panel.spectrogram_levels is None
+        self._spec_scale_status.setText(
+            "Auto (from data)" if auto else "Manual levels"
+        )
+        self._updating_spec_dock = True
+        self._spec_db_min_spin.setValue(lo)
+        self._spec_db_max_spin.setValue(hi)
+        self._updating_spec_dock = False
+
+    def _apply_spectrogram_levels_to_panel(
+        self, panel: _PlotPanel, lo: float, hi: float
+    ) -> None:
+        if lo >= hi:
+            return
+        panel.spectrogram_levels = (float(lo), float(hi))
+        for image in panel.image_items:
+            image.setLevels((lo, hi))
+        for bar in panel.color_bars:
+            bar.setLevels(values=(lo, hi))
+            self._style_spectrogram_colorbar(bar, (lo, hi))
+        self._refresh_spectrogram_dock()
+
+    def _apply_spectrogram_levels_from_dock(self) -> None:
+        if self._updating_spec_dock:
+            return
+        panel = self._active_cursor_panel()
+        if panel is None or not panel.is_spectrogram():
+            return
+        lo = float(self._spec_db_min_spin.value())
+        hi = float(self._spec_db_max_spin.value())
+        self._apply_spectrogram_levels_to_panel(panel, lo, hi)
+
+    def _on_spec_levels_changed(self, _value: float) -> None:
+        self._apply_spectrogram_levels_from_dock()
+
+    def _auto_spectrogram_levels(self) -> None:
+        panel = self._active_cursor_panel()
+        if panel is None or not panel.is_spectrogram():
+            return
+        panel.spectrogram_levels = None
+        self._redraw_curves(fit=False)
+        self._refresh_spectrogram_dock()
+
+    def _connect_spectrogram_colorbar(
+        self, panel: _PlotPanel, bar: pg.ColorBarItem
+    ) -> None:
+        def on_changed(_bar: pg.ColorBarItem) -> None:
+            if self._updating_spec_dock:
+                return
+            lo, hi = bar.levels()
+            panel.spectrogram_levels = (float(lo), float(hi))
+            self._style_spectrogram_colorbar(bar, (float(lo), float(hi)))
+            self._refresh_spectrogram_dock()
+
+        bar.sigLevelsChanged.connect(on_changed)
+        bar.sigLevelsChangeFinished.connect(on_changed)
+
+    def show_spectrogram_color_scale(self) -> None:
+        """Open the spectrogram color-scale dock (from View menu / right-click)."""
+        panel = self._active_cursor_panel()
+        if panel is None or not panel.is_spectrogram():
+            # Prefer the panel under the context menu ViewBox if available.
+            for p in self._panels:
+                if p.is_spectrogram():
+                    try:
+                        self._active_panel = self._panels.index(p)
+                    except ValueError:
+                        pass
+                    break
+        if hasattr(self, "_spectrogram_dock_action"):
+            self._spectrogram_dock_action.setChecked(True)
+        self._spectrogram_dock.setVisible(True)
+        self._spectrogram_dock.raise_()
+        self._refresh_spectrogram_dock()
+
     def _draw_frequency_panel(self, panel: _PlotPanel) -> None:
         label_map = {
             "mag": ("Magnitude", ""),
@@ -2220,7 +3001,7 @@ class MainWindow(QMainWindow):
         panel.plot.setTitle(y_name)
         for sid in panel.series_ids:
             series = self._project.get(sid)
-            if series is None:
+            if series is None or series.is_spectrogram():
                 continue
             freq, y = self._spectrum_xy(series, panel.y_kind)
             if freq.size == 0:
@@ -2236,6 +3017,8 @@ class MainWindow(QMainWindow):
 
     def _spectrum_xy(self, series, y_kind: str) -> tuple[np.ndarray, np.ndarray]:
         """Return (freq, y) for a series on a frequency panel."""
+        if series.is_spectrogram():
+            return np.array([]), np.array([])
         if series.is_spectrum():
             freq = series.time_axis()
             if y_kind == "mag":
@@ -2352,6 +3135,37 @@ class MainWindow(QMainWindow):
     ) -> list[tuple[str, str]]:
         """Return (series_name, value_text) at x for the active panel."""
         rows: list[tuple[str, str]] = []
+        if panel.is_spectrogram():
+            y = self._last_view_pos[1] if self._last_view_pos is not None else 0.0
+            y_mode = panel.spectrogram_y_axis
+            for sid in panel.series_ids:
+                series = self._project.get(sid)
+                if series is None or not series.is_spectrogram():
+                    continue
+                series.ensure_loaded()
+                y_axis = self._spectrogram_y_values(series, y_mode=y_mode)
+                freq = series.time
+                mag = series.data
+                if y_axis is None or freq is None or mag is None or mag.ndim != 2:
+                    continue
+                fi = self._nearest_index(np.asarray(freq, dtype=np.float64), x)
+                ti = self._nearest_index(np.asarray(y_axis, dtype=np.float64), y)
+                val_db = float(_spectrogram_db(mag)[fi, ti])
+                unit = f" {series.unit}" if series.unit else ""
+                if y_mode == "angle":
+                    y_txt = f"θ={float(y_axis[ti]):.4g} deg"
+                elif y_mode == "rpm":
+                    y_txt = f"RPM={float(y_axis[ti]):.4g}"
+                else:
+                    y_txt = f"t={float(y_axis[ti]):.4g} s"
+                rows.append(
+                    (
+                        series.display_name,
+                        f"{val_db:.3g} dB re{unit or ' mag'} @ "
+                        f"{float(freq[fi]):.4g} Hz, {y_txt}",
+                    )
+                )
+            return rows
         if self._spectrum_mode() or panel.is_frequency():
             for curve in panel.curves:
                 data = curve.getData()
@@ -2384,15 +3198,34 @@ class MainWindow(QMainWindow):
         panel = self._active_cursor_panel()
         rows: list[tuple[str, str, str]] = []
         parts: list[str] = []
-        freq = self._spectrum_mode() or (panel is not None and panel.is_frequency())
-        x_name = "f" if freq else "t"
-        x_unit = "Hz" if freq else "s"
+        spectrogram = panel is not None and panel.is_spectrogram()
+        freq_panel = (not spectrogram) and (
+            self._spectrum_mode() or (panel is not None and panel.is_frequency())
+        )
+        if spectrogram or freq_panel:
+            x_name, x_unit = "f", "Hz"
+        else:
+            x_name, x_unit = "t", "s"
 
         if self._last_view_pos is not None and panel is not None:
             x, y = self._last_view_pos
             at = f"Mouse {x_name}={x:.6g}"
             parts.append(f"{x_name}≈{x:.6g} {x_unit}")
-            if freq:
+            if spectrogram:
+                y_mode = panel.spectrogram_y_axis
+                if y_mode == "angle":
+                    parts.append(f"θ≈{y:.6g} deg")
+                    rows.append((at, "f [Hz]", f"{x:.6g}"))
+                    rows.append((at, "θ [deg]", f"{y:.6g}"))
+                elif y_mode == "rpm":
+                    parts.append(f"RPM≈{y:.6g}")
+                    rows.append((at, "f [Hz]", f"{x:.6g}"))
+                    rows.append((at, "RPM", f"{y:.6g}"))
+                else:
+                    parts.append(f"t≈{y:.6g} s")
+                    rows.append((at, "f [Hz]", f"{x:.6g}"))
+                    rows.append((at, "t [s]", f"{y:.6g}"))
+            elif freq_panel:
                 parts.append(f"y={y:.6g}")
                 rows.append((at, f"{x_name} [{x_unit}]", f"{x:.6g}"))
                 rows.append((at, "y", f"{y:.6g}"))

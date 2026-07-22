@@ -30,9 +30,10 @@ python -m nagilize
 - **File → Open project… / Save project…** — `.nagproj` (single zip file; waveforms embedded; views restored)
 - **File → Add file…** — add `.wav` / `.csv` / `.uff` / `.unv` into the project
 - **File → Export selected source CSV…** — export the source selected in **Project data**
-- **Analyze → Spectrum (FFT)…** / **Analysis** tab — window, NFFT, Welch averaging, amplitude scale; Run adds one spectrum result. `fs` / `Δf` are derived from the measurement and settings
-- **Project data** — tree by source; row shows `name | point · dof | ← ref · ref_dof`; filter / sort; right-click series → Edit metadata; drag onto plots (spectrum drop converts that cell to Mag+Phase). Drag the splitter to resize the left pane
-- **View → New / Close / Rename page** — multiple view pages (Analysis tab stays open)
+- **Analyze → Spectrum (FFT)…** / top ribbon **Analysis** — select series in Project data → Add; optional **Dataset name** (auto `FFT N · …` if blank); Run creates one new dataset per run
+- **Views** (ribbon) — Page 1 / Page 2 / … tabs at the bottom for plot layouts; drag spectrum results onto a cell for Mag+Phase
+- **Project data** — tree by source; row shows `name | point · dof | ← ref · ref_dof`; filter / sort; right-click series → Edit metadata; drag onto plots. Drag the splitter to resize the left pane
+- **View → New / Close / Rename page** — pages live under **Views** (ribbon), not mixed with Analysis
 - **View → Spectrum** — optional whole-page Time / Mag+Phase / Real+Imag preview (legacy on-the-fly FFT)
 - **View → Cursor values** — optional floating table: mouse cursor **and** vertical marker positions / series values (hidden by default)
 - **View → Layout** — presets; drag splitters to resize
@@ -59,6 +60,11 @@ for sid in proj.series_order:
 | `samples/demo_sine_stereo.wav` | stereo sine (M1) |
 | `samples/demo_sine_stereo.csv` | exported CSV of the same |
 | `samples/demo_time.uff` | 2-ch dataset-58 time (`scripts/make_demo_uff.py`) |
+| `samples/demo_10ch_time.uff` | 10-ch dataset-58 time (`scripts/make_demo_10ch_uff.py`) |
+| `samples/demo_tacho_pulse.csv` | Vibration + pulse tacho (run-up 600→2400 RPM, 1 ppr; `scripts/make_demo_tacho.py`) |
+| `samples/demo_tacho_rpm.csv` | Vibration + RPM run-up 600→2400 (`scripts/make_demo_tacho.py`) |
+
+Equal-RPM STFT: add either CSV → Analysis → STFT → **Equal RPM** (ΔRPM=10) → pick `Tacho_pulse` (Kind **Pulse**, Pulses/rev **1**) or `RPM` (Kind **RPM**). Views right-click → **Y axis → RPM**.
 
 ## License
 

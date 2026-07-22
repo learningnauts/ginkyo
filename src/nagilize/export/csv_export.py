@@ -9,6 +9,15 @@ import numpy as np
 from nagilize.core.model import Recording
 
 
+def channel_header(name: str, unit: str = "") -> str:
+    """Column header; non-empty unit becomes ``Name [unit]``."""
+    n = (name or "").strip() or "Ch"
+    u = (unit or "").strip()
+    if u:
+        return f"{n} [{u}]"
+    return n
+
+
 def export_csv(recording: Recording, path: str | Path) -> None:
     """Write time + all channels to CSV (header row included)."""
     path = Path(path)
@@ -23,7 +32,9 @@ def export_csv(recording: Recording, path: str | Path) -> None:
         if col.shape[0] != n:
             raise ValueError(f"Column {i} length mismatch: {col.shape[0]} != {n}")
 
-    header = ["time_s"] + [ch.name for ch in recording.channels]
+    header = ["time_s"] + [
+        channel_header(ch.name, ch.unit) for ch in recording.channels
+    ]
     stacked = np.column_stack(cols)
     np.savetxt(
         path,
