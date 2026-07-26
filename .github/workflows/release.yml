@@ -1,0 +1,90 @@
+name: Release binaries
+
+# Build Windows + macOS desktop bundles and attach them to a GitHub Release
+# when a version tag (v*) is pushed. Manual runs upload artifacts only.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: ginkyo-windows-x64
+          - os: macos-latest
+            artifact: ginkyo-macos-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install package + PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          pip install --no-compile -e .
+          pip install "pyinstaller>=6.3"
+
+      - name: Build with PyInstaller
+        run: pyinstaller packaging/ginkyo.spec --noconfirm
+
+      - name: Package Windows zip
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist/ginkyo/* -DestinationPath ${{ matrix.artifact }}.zip -Force
+
+      - name: Package macOS zip
+        if: runner.os == 'macOS'
+        run: |
+          if [ -d dist/ginkyo.app ]; then
+            ditto -c -k --sequesterRsrc --keepParent dist/ginkyo.app ${{ matrix.artifact }}.zip
+          else
+            ditto -c -k --sequesterRsrc --keepParent dist/ginkyo ${{ matrix.artifact }}.zip
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.zip
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten zip files
+        run: |
+          mkdir -p upload
+          find artifacts -type f -name '*.zip' -exec cp {} upload/ \;
+          ls -la upload
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: upload/*
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

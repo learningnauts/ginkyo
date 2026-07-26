@@ -1,4 +1,4 @@
-"""Load / save ``.nagproj`` (zip) projects with on-demand waveform cache (Y1b)."""
+"""Load / save ``.ginkyo`` (zip) projects with on-demand waveform cache (Y1b)."""
 
 from __future__ import annotations
 
@@ -11,8 +11,8 @@ from typing import Any
 
 import numpy as np
 
-from nagilize.core.model import SeriesMeta
-from nagilize.core.project import Project, Series, SourceRef
+from ginkyo.core.model import SeriesMeta
+from ginkyo.core.project import Project, Series, SourceRef
 
 FORMAT_VERSION = 1
 PROJECT_JSON = "project.json"
@@ -28,10 +28,10 @@ def save_project(
     *,
     views: list[dict[str, Any]] | None = None,
 ) -> None:
-    """Write project as a single ``.nagproj`` zip (embedded arrays + catalog)."""
+    """Write project as a single ``.ginkyo`` zip (embedded arrays + catalog)."""
     path = Path(path)
-    if path.suffix.lower() != ".nagproj":
-        path = path.with_suffix(".nagproj")
+    if path.suffix.lower() != ".ginkyo":
+        path = path.with_suffix(".ginkyo")
 
     # Materialize every series so the archive is self-contained.
     for sid in project.series_order:
@@ -55,7 +55,7 @@ def save_project(
         "views": list(views or []),
     }
 
-    tmp_dir = Path(tempfile.mkdtemp(prefix="nagilize-save-"))
+    tmp_dir = Path(tempfile.mkdtemp(prefix="ginkyo-save-"))
     try:
         data_dir = tmp_dir / "data"
         data_dir.mkdir()
@@ -125,13 +125,13 @@ def save_project(
 
 
 def load_project(path: str | Path) -> Project:
-    """Open a ``.nagproj``; waveforms load into a temp cache on first use (Y1b)."""
+    """Open a ``.ginkyo``; waveforms load into a temp cache on first use (Y1b)."""
     path = Path(path)
     if not path.is_file():
         raise FileNotFoundError(path)
 
     project = Project(path=path)
-    cache = Path(tempfile.mkdtemp(prefix="nagilize-cache-"))
+    cache = Path(tempfile.mkdtemp(prefix="ginkyo-cache-"))
     project._cache_dir = cache
 
     with zipfile.ZipFile(path, "r") as zf:
@@ -140,7 +140,7 @@ def load_project(path: str | Path) -> Project:
 
     if int(catalog.get("format_version") or 1) > FORMAT_VERSION:
         raise ValueError(
-            f"Unsupported .nagproj format_version={catalog.get('format_version')}"
+            f"Unsupported .ginkyo format_version={catalog.get('format_version')}"
         )
 
     for src in catalog.get("sources") or []:

@@ -63,7 +63,7 @@ def main() -> None:
             ref_dir=0,
             id1=label,
             id2=f"f0={freq_hz:g} Hz",
-            id3="nagilize demo 10ch",
+            id3="ginkyo demo 10ch",
             id4="",
             id5="",
             data=y.astype(np.float64),

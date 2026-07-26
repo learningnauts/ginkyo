@@ -1,76 +1,99 @@
-# nagilize（ナギライズ）
+# 吟響 / Ginkyo（ぎんきょう）
 
-振動・音データの解析ワークベンチ（開発中）。
+音を吟味する、振動・音データの解析ワークベンチ。
+
+**非公式OSSです。HBK / Brüel & Kjær / LAN-XI とは無関係です。**
 
 ## Status
 
-**Project file + series meta + pages** — save/open `.nagproj`; series carry point/DOF/FRF reference fields; multi-page views; layout presets; DnD assign.
+**v0.1.0** — ファイルを開く・見る・FFT/STFT・スペクトル計測・プロジェクト保存まで一通り使えるプレビュー版。
 
-**Spectrum results (M3)** — Analysis page FFT → one Mag+Phase result in the project; drop onto a plot cell for Mag (top) / Phase (bottom).
+日常利用は **GitHub Releases の実行ファイル**（Windows / macOS）を想定。ソースは同じリポジトリで公開（MIT）。
 
-## Requirements
+## Download（使う人向け）
+
+1. [Releases](https://github.com/learningnauts/ginkyo-dev/releases) から最新の zip を取得  
+   - `ginkyo-windows-x64.zip`  
+   - `ginkyo-macos-arm64.zip`（Apple Silicon 向け。Intel Mac はソースから実行）
+2. 展開して `ginkyo`（Windows は `ginkyo.exe`）を起動  
+3. 初回は OS の未署名警告が出ることがあります（後からコード署名予定）
+
+タグ `v*` を push すると GitHub Actions が両 OS のバイナリを自動ビルドして Release に添付します。手順は [RELEASE.md](RELEASE.md)。
+
+## Requirements（ソースから動かす場合）
 
 - Python 3.9+
-- macOS / Windows / Linux (desktop GUI)
+- macOS / Windows / Linux（デスクトップ GUI）
 
-## Quick start
+## Quick start（開発者）
 
 ```bash
-cd /path/to/nagilize
+cd /path/to/ginkyo
 python3 -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install --no-compile -e .
-python -m nagilize
+python -m ginkyo
 ```
 
-> Tip: if full `PySide6` install fails on compile of template files, use `PySide6-Essentials` (already pinned) and/or `pip install --no-compile`.
+> Tip: full `PySide6` のインストールで失敗する場合は `PySide6-Essentials`（本プロジェクト既定）と `pip install --no-compile` を試してください。
 
 ### In the app
 
-- **File → Open project… / Save project…** — `.nagproj` (single zip file; waveforms embedded; views restored)
-- **File → Add file…** — add `.wav` / `.csv` / `.uff` / `.unv` into the project
-- **File → Export selected source CSV…** — export the source selected in **Project data**
-- **Analyze → Spectrum (FFT)…** / top ribbon **Analysis** — select series in Project data → Add; optional **Dataset name** (auto `FFT N · …` if blank); Run creates one new dataset per run
-- **Views** (ribbon) — Page 1 / Page 2 / … tabs at the bottom for plot layouts; drag spectrum results onto a cell for Mag+Phase
-- **Project data** — tree by source; row shows `name | point · dof | ← ref · ref_dof`; filter / sort; right-click series → Edit metadata; drag onto plots. Drag the splitter to resize the left pane
-- **View → New / Close / Rename page** — pages live under **Views** (ribbon), not mixed with Analysis
-- **View → Spectrum** — optional whole-page Time / Mag+Phase / Real+Imag preview (legacy on-the-fly FFT)
-- **View → Cursor values** — optional floating table: mouse cursor **and** vertical marker positions / series values (hidden by default)
-- **View → Layout** — presets; drag splitters to resize
-- **View → Reset zoom** (`Ctrl+0`)
-- **View → Link X axes / Link Y axes** — toggle pan/zoom linking across panels (X on by default, Y off)
+- **File → Open / Save project…** — `.ginkyo`（波形埋め込み・ビュー復元）
+- **File → Add file…** — `.wav` / `.csv` / `.uff` / `.unv`
+- **Analyze / Analysis** — FFT スペクトル、STFT スペクトログラム（Overlap / Δt / equal angle / equal RPM）
+- **Views** — ページ・レイアウト・DnD で Mag+Phase / スペクトログラム表示
+- **View → Spectrum measure** — Mag Linear/dB、Overall / Band RMS、ピーク拾い
+- **View → Cursor values** — マウス／縦マーカーの値表
 
 ### From Python (read-only)
 
 ```python
-from nagilize import Project
+from ginkyo import Project
 
-proj = Project.open("Run.nagproj")
+proj = Project.open("Run.ginkyo")
 for sid in proj.series_order:
     s = proj.get(sid)
     print(s.name, s.meta.point_id, s.meta.dof)
-    # Waveform loads on first access (cached):
-    y = s.data
+    y = s.data  # loads on first access
 ```
 
 ### Samples
 
 | File | Notes |
 |------|--------|
-| `samples/demo_sine_stereo.wav` | stereo sine (M1) |
-| `samples/demo_sine_stereo.csv` | exported CSV of the same |
-| `samples/demo_time.uff` | 2-ch dataset-58 time (`scripts/make_demo_uff.py`) |
-| `samples/demo_10ch_time.uff` | 10-ch dataset-58 time (`scripts/make_demo_10ch_uff.py`) |
-| `samples/demo_tacho_pulse.csv` | Vibration + pulse tacho (run-up 600→2400 RPM, 1 ppr; `scripts/make_demo_tacho.py`) |
-| `samples/demo_tacho_rpm.csv` | Vibration + RPM run-up 600→2400 (`scripts/make_demo_tacho.py`) |
+| `samples/demo_sine_stereo.wav` | stereo sine |
+| `samples/demo_sine_stereo.csv` | same as CSV (`Name [unit]` headers) |
+| `samples/demo_time.uff` | 2-ch dataset-58 time |
+| `samples/demo_10ch_time.uff` | 10-ch dataset-58 time |
+| `samples/demo_tacho_pulse.csv` | vibration + pulse tacho (run-up) |
+| `samples/demo_tacho_rpm.csv` | vibration + RPM run-up |
 
-Equal-RPM STFT: add either CSV → Analysis → STFT → **Equal RPM** (ΔRPM=10) → pick `Tacho_pulse` (Kind **Pulse**, Pulses/rev **1**) or `RPM` (Kind **RPM**). Views right-click → **Y axis → RPM**.
+Equal-RPM STFT: add a tacho sample → Analysis → STFT → **Equal RPM** → pick pulse or RPM series → Views → **Y axis → RPM**.
+
+### Build desktop binary locally
+
+```bash
+pip install -e . pyinstaller
+pyinstaller packaging/ginkyo.spec --noconfirm
+# → dist/ginkyo/
+```
+
+## Known limitations
+
+- dB は `20·log10`、基準は系列単位の **1**（SPL や ISO 振動基準は未対応）
+- バンド RMS は Analysis の **peak / rms** 振幅定義を推奨（`lin` は厳密な工学 RMS ではない）
+- Release バイナリは未署名
+- ライブ取得・プラグイン・オーダー解析は未収録（今後の拡張）
 
 ## License
 
 MIT — see [LICENSE](LICENSE).
 
+## Disclaimer
+
+Ginkyo (吟響) is an independent open-source project. It is **not** affiliated with, endorsed by, or connected to Hottinger Brüel & Kjær (HBK), Brüel & Kjær, or LAN-XI products.
+
 ## Notes
 
-Product vision and milestones live in the personal workspace memo  
-(`Mybrain/03_SideHustle/app/lanxi/lanxi_notes.md`), not in this repo.
+Product vision and private milestones live in a personal workspace memo (not in this repo). See [CHANGELOG.md](CHANGELOG.md) for release history.

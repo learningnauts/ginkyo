@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
-from nagilize.core.model import Channel, Recording
+from ginkyo.core.model import Channel, Recording
 
 
 def read_wav(path: str | Path) -> Recording:

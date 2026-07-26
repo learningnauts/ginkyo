@@ -30,8 +30,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from nagilize.core.project import Project, Series
-from nagilize.core.spectrum import (
+from ginkyo.core.project import Project, Series
+from ginkyo.core.spectrum import (
     AMPLITUDE_SCALES,
     WINDOW_NAMES,
     SpectrumParams,
@@ -49,7 +49,7 @@ from nagilize.core.spectrum import (
     stft_hop_samples,
     stft_overlap_equiv,
 )
-from nagilize.ui.panel_shell import SERIES_MIME
+from ginkyo.ui.panel_shell import SERIES_MIME
 
 DEFAULT_RESULT_SUFFIX = "· Spectrum"
 DEFAULT_STFT_RESULT_SUFFIX = "· Spectrogram"

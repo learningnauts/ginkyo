@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
-from nagilize.core.model import Recording
+from ginkyo.core.model import Recording
 
 
 def channel_header(name: str, unit: str = "") -> str:

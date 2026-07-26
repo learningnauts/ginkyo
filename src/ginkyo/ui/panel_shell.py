@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-SERIES_MIME = "application/x-nagilize-series-ids"
+SERIES_MIME = "application/x-ginkyo-series-ids"
 ROLE_SOURCE = int(Qt.ItemDataRole.UserRole)
 ROLE_SERIES = int(Qt.ItemDataRole.UserRole) + 1
 

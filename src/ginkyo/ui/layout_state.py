@@ -327,7 +327,7 @@ def build_preset(preset_id: str, series_ids: list[str] | None = None) -> Workspa
 
 
 def layouts_dir() -> Path:
-    return Path.home() / ".config" / "nagilize" / "layouts"
+    return Path.home() / ".config" / "ginkyo" / "layouts"
 
 
 def save_layout(path: str | Path, layout: WorkspaceLayout) -> None:

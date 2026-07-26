@@ -18,7 +18,7 @@ import re
 
 import numpy as np
 
-from nagilize.core.model import Channel, Recording
+from ginkyo.core.model import Channel, Recording
 
 _TIME_NAMES = {"time", "time_s", "t", "times", "timestamp"}
 # "Name [unit]" or "Name (unit)" — unit is optional trailing bracket group.

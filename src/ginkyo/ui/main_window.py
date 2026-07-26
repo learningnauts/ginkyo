@@ -14,6 +14,7 @@ from PySide6.QtGui import QAction, QActionGroup, QKeyEvent, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
+    QCheckBox,
     QColorDialog,
     QComboBox,
     QDockWidget,
@@ -29,7 +30,9 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QRadioButton,
     QSplitter,
+    QSpinBox,
     QStackedWidget,
     QStatusBar,
     QStyleFactory,
@@ -44,17 +47,24 @@ from PySide6.QtWidgets import (
 from pyqtgraph.graphicsItems.InfiniteLine import InfLineLabel
 from pyqtgraph.graphicsItems.ViewBox.ViewBoxMenu import ViewBoxMenu
 
-from nagilize.core.dummy import make_sine_with_noise
-from nagilize.core.model import Channel, Recording
-from nagilize.core.project import Project, Series
-from nagilize.core.project_io import take_pending_views
-from nagilize.core.spectrum import compute_spectrum
-from nagilize.export.csv_export import export_csv
-from nagilize.readers.csv_reader import read_csv
-from nagilize.readers.uff import read_uff
-from nagilize.readers.wav import read_wav
-from nagilize.ui.analysis_page import AnalysisPage
-from nagilize.ui.layout_state import (
+from ginkyo.core.dummy import make_sine_with_noise
+from ginkyo.core.measure import (
+    band_rms,
+    find_spectrum_peaks,
+    level_db,
+    series_amplitude_scale,
+    to_db,
+)
+from ginkyo.core.model import Channel, Recording
+from ginkyo.core.project import Project, Series
+from ginkyo.core.project_io import take_pending_views
+from ginkyo.core.spectrum import compute_spectrum
+from ginkyo.export.csv_export import export_csv
+from ginkyo.readers.csv_reader import read_csv
+from ginkyo.readers.uff import read_uff
+from ginkyo.readers.wav import read_wav
+from ginkyo.ui.analysis_page import AnalysisPage
+from ginkyo.ui.layout_state import (
     LayoutNode,
     WorkspaceLayout,
     build_preset,
@@ -64,7 +74,7 @@ from nagilize.ui.layout_state import (
     preset_label,
     save_layout,
 )
-from nagilize.ui.panel_shell import ROLE_SERIES, ROLE_SOURCE, PanelShell, SeriesTree
+from ginkyo.ui.panel_shell import ROLE_SERIES, ROLE_SOURCE, PanelShell, SeriesTree
 
 _PENS = (
     "#1f4e79",  # navy
@@ -83,7 +93,7 @@ _PENS = (
 
 
 def _spectrogram_db(magnitude: np.ndarray) -> np.ndarray:
-    return 20.0 * np.log10(np.maximum(np.asarray(magnitude, dtype=np.float64), 1e-12))
+    return np.asarray(to_db(magnitude), dtype=np.float64)
 
 
 def _axis_image_extent(axis: np.ndarray) -> tuple[float, float]:
@@ -490,6 +500,10 @@ class _PageState:
     title: str
     workspace: WorkspaceLayout
     display_mode: str = _MODE_TIME
+    mag_db: bool = False
+    measure_use_band: bool = False
+    measure_f_lo: float = 0.0
+    measure_f_hi: float = 0.0
     built: bool = False
     panels: list[_PlotPanel] = field(default_factory=list)
     synced_markers: list[_SyncedMarker] = field(default_factory=list)
@@ -505,7 +519,7 @@ class _PageState:
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("nagilize")
+        self.setWindowTitle("Ginkyo 吟響")
         self.resize(1200, 700)
 
         self._project = Project()
@@ -530,6 +544,11 @@ class MainWindow(QMainWindow):
         self._node_widgets: list[tuple[LayoutNode, QWidget]] = []
         self._link_x = True
         self._link_y = False
+        self._mag_db = False
+        self._measure_use_band = False
+        self._measure_f_lo = 0.0
+        self._measure_f_hi = 0.0
+        self._updating_measure_dock = False
 
         central = QWidget(self)
         root = QHBoxLayout(central)
@@ -641,7 +660,7 @@ class MainWindow(QMainWindow):
         ribbon_row = QHBoxLayout(ribbon)
         ribbon_row.setContentsMargins(10, 0, 10, 0)
         ribbon_row.setSpacing(0)
-        brand = QLabel("nagilize")
+        brand = QLabel("Ginkyo 吟響")
         brand.setObjectName("RibbonBrand")
         ribbon_row.addWidget(brand)
 
@@ -785,6 +804,7 @@ class MainWindow(QMainWindow):
         self.setStatusBar(QStatusBar(self))
         self._build_cursor_dock()
         self._build_spectrogram_dock()
+        self._build_measure_dock()
         self._build_menu()
         self._rebuild_panels()
         self.add_recording(make_sine_with_noise(), reset_layout=True)
@@ -884,6 +904,109 @@ class MainWindow(QMainWindow):
         )
         self._updating_spec_dock = False
 
+    def _build_measure_dock(self) -> None:
+        dock = QDockWidget("Spectrum measure", self)
+        dock.setObjectName("SpectrumMeasureDock")
+        dock.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea
+            | Qt.DockWidgetArea.RightDockWidgetArea
+            | Qt.DockWidgetArea.BottomDockWidgetArea
+            | Qt.DockWidgetArea.TopDockWidgetArea
+        )
+        body = QWidget()
+        layout = QVBoxLayout(body)
+        hint = QLabel(
+            "Measure Mag spectra in Views: Linear/dB display, "
+            "overall / band RMS (peak·rms amplitude scales), peak pick. "
+            "Prefer peak or rms amplitude scale from Analysis."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #444;")
+        layout.addWidget(hint)
+
+        disp_row = QHBoxLayout()
+        disp_row.addWidget(QLabel("Mag Y"))
+        self._mag_linear_btn = QRadioButton("Linear")
+        self._mag_db_btn = QRadioButton("dB")
+        self._mag_linear_btn.setChecked(True)
+        mag_group = QButtonGroup(self)
+        mag_group.addButton(self._mag_linear_btn)
+        mag_group.addButton(self._mag_db_btn)
+        self._mag_linear_btn.toggled.connect(self._on_mag_db_toggled)
+        self._mag_db_btn.toggled.connect(self._on_mag_db_toggled)
+        disp_row.addWidget(self._mag_linear_btn)
+        disp_row.addWidget(self._mag_db_btn)
+        disp_row.addStretch(1)
+        layout.addLayout(disp_row)
+
+        self._measure_series_label = QLabel("Series: —")
+        self._measure_series_label.setStyleSheet("color: #666;")
+        layout.addWidget(self._measure_series_label)
+
+        self._measure_overall_label = QLabel("Overall RMS: —")
+        layout.addWidget(self._measure_overall_label)
+        self._measure_band_label = QLabel("Band RMS: —")
+        layout.addWidget(self._measure_band_label)
+
+        self._measure_use_band_cb = QCheckBox("Use band (f min / f max)")
+        self._measure_use_band_cb.setChecked(False)
+        self._measure_use_band_cb.toggled.connect(self._on_measure_band_changed)
+        layout.addWidget(self._measure_use_band_cb)
+
+        band_row = QHBoxLayout()
+        band_row.addWidget(QLabel("f min"))
+        self._measure_f_lo_spin = QDoubleSpinBox()
+        self._measure_f_lo_spin.setRange(0.0, 1e9)
+        self._measure_f_lo_spin.setDecimals(3)
+        self._measure_f_lo_spin.setSuffix(" Hz")
+        self._measure_f_lo_spin.valueChanged.connect(self._on_measure_band_changed)
+        band_row.addWidget(self._measure_f_lo_spin)
+        band_row.addWidget(QLabel("f max"))
+        self._measure_f_hi_spin = QDoubleSpinBox()
+        self._measure_f_hi_spin.setRange(0.0, 1e9)
+        self._measure_f_hi_spin.setDecimals(3)
+        self._measure_f_hi_spin.setSuffix(" Hz")
+        self._measure_f_hi_spin.valueChanged.connect(self._on_measure_band_changed)
+        band_row.addWidget(self._measure_f_hi_spin)
+        layout.addLayout(band_row)
+
+        from_markers_btn = QPushButton("Band from V1 / V2")
+        from_markers_btn.setToolTip(
+            "Set f min / f max from the first two vertical markers"
+        )
+        from_markers_btn.clicked.connect(self._measure_band_from_markers)
+        layout.addWidget(from_markers_btn)
+
+        peak_row = QHBoxLayout()
+        peak_row.addWidget(QLabel("Peaks"))
+        self._measure_n_peaks_spin = QSpinBox()
+        self._measure_n_peaks_spin.setRange(1, 50)
+        self._measure_n_peaks_spin.setValue(5)
+        peak_row.addWidget(self._measure_n_peaks_spin)
+        pick_btn = QPushButton("Pick peaks")
+        pick_btn.setToolTip("Find local maxima and place vertical markers")
+        pick_btn.clicked.connect(self._pick_spectrum_peaks)
+        peak_row.addWidget(pick_btn)
+        peak_row.addStretch(1)
+        layout.addLayout(peak_row)
+
+        self._measure_peaks_table = QTableWidget(0, 3)
+        self._measure_peaks_table.setHorizontalHeaderLabels(["f [Hz]", "Mag", "Unit"])
+        self._measure_peaks_table.horizontalHeader().setStretchLastSection(True)
+        self._measure_peaks_table.setMaximumHeight(160)
+        layout.addWidget(self._measure_peaks_table)
+
+        refresh_btn = QPushButton("Refresh")
+        refresh_btn.clicked.connect(self._refresh_measure_dock)
+        layout.addWidget(refresh_btn)
+        layout.addStretch(1)
+
+        dock.setWidget(body)
+        dock.setFloating(True)
+        dock.hide()
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+        self._measure_dock = dock
+
     # --- workspace mode + view pages -------------------------------------
 
     def _is_views_mode(self) -> bool:
@@ -919,6 +1042,11 @@ class MainWindow(QMainWindow):
                 self._mouse_proxies = page.mouse_proxies
                 self._workspace = page.workspace
                 self._display_mode = page.display_mode
+                self._mag_db = page.mag_db
+                self._measure_use_band = page.measure_use_band
+                self._measure_f_lo = page.measure_f_lo
+                self._measure_f_hi = page.measure_f_hi
+                self._sync_measure_dock_controls()
 
     def _on_mode_changed(self, index: int) -> None:
         self._set_workspace_mode(index)
@@ -948,6 +1076,10 @@ class MainWindow(QMainWindow):
         self._sync_workspace_from_panels()
         page = self._pages[index]
         page.display_mode = self._display_mode
+        page.mag_db = self._mag_db
+        page.measure_use_band = self._measure_use_band
+        page.measure_f_lo = self._measure_f_lo
+        page.measure_f_hi = self._measure_f_hi
         if 0 <= index < self._tabs.count():
             page.title = self._tabs.tabText(index)
         page.panels = self._panels
@@ -992,6 +1124,10 @@ class MainWindow(QMainWindow):
     def _apply_spectrum_menu(self, mode: str) -> None:
         for key, act in self._spectrum_actions.items():
             act.setChecked(key == mode)
+        if hasattr(self, "_mag_db_action"):
+            self._mag_db_action.blockSignals(True)
+            self._mag_db_action.setChecked(bool(self._mag_db))
+            self._mag_db_action.blockSignals(False)
 
     def _set_workspace(self, layout: WorkspaceLayout) -> None:
         self._workspace = layout
@@ -1003,7 +1139,12 @@ class MainWindow(QMainWindow):
         self._page_index = index
         self._workspace = page.workspace
         self._display_mode = page.display_mode
+        self._mag_db = bool(page.mag_db)
+        self._measure_use_band = bool(page.measure_use_band)
+        self._measure_f_lo = float(page.measure_f_lo)
+        self._measure_f_hi = float(page.measure_f_hi)
         self._apply_spectrum_menu(page.display_mode)
+        self._sync_measure_dock_controls()
 
         if page.built and page.root_plot_widget is not None:
             self._panels = page.panels
@@ -1101,7 +1242,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(msg, 6000)
 
     def _autosave_project_if_path_known(self) -> bool:
-        """Save in place when the project already has a .nagproj path. New projects skip."""
+        """Save in place when the project already has a .ginkyo path. New projects skip."""
         if self._project.path is None:
             return False
         try:
@@ -1734,6 +1875,13 @@ class MainWindow(QMainWindow):
         spec_dock_act.toggled.connect(self._toggle_spectrogram_dock)
         view_menu.addAction(spec_dock_act)
         self._spectrogram_dock_action = spec_dock_act
+
+        measure_dock_act = QAction("Spectrum measure", self)
+        measure_dock_act.setCheckable(True)
+        measure_dock_act.setChecked(False)
+        measure_dock_act.toggled.connect(self._toggle_measure_dock)
+        view_menu.addAction(measure_dock_act)
+        self._measure_dock_action = measure_dock_act
         view_menu.addSeparator()
 
         reset_act = QAction("Reset zoom", self)
@@ -1791,6 +1939,18 @@ class MainWindow(QMainWindow):
             spectrum_menu.addAction(act)
             self._spectrum_actions[key] = act
 
+        mag_db_act = QAction("Magnitude in dB", self)
+        mag_db_act.setCheckable(True)
+        mag_db_act.setChecked(False)
+        mag_db_act.toggled.connect(self._set_mag_db_from_menu)
+        spectrum_menu.addSeparator()
+        spectrum_menu.addAction(mag_db_act)
+        self._mag_db_action = mag_db_act
+
+        pick_peaks_act = QAction("Pick spectrum peaks…", self)
+        pick_peaks_act.triggered.connect(self._pick_spectrum_peaks)
+        spectrum_menu.addAction(pick_peaks_act)
+
         view_menu.addSeparator()
         add_v = QAction("Add vertical line", self)
         add_v.setShortcut("V")
@@ -1823,12 +1983,208 @@ class MainWindow(QMainWindow):
             self._spectrogram_dock.raise_()
             self._refresh_spectrogram_dock()
 
+    def _toggle_measure_dock(self, visible: bool) -> None:
+        self._measure_dock.setVisible(visible)
+        if visible:
+            self._measure_dock.raise_()
+            self._refresh_measure_dock()
+
+    def _sync_measure_dock_controls(self) -> None:
+        if not hasattr(self, "_measure_f_lo_spin"):
+            return
+        self._updating_measure_dock = True
+        try:
+            self._mag_linear_btn.setChecked(not self._mag_db)
+            self._mag_db_btn.setChecked(self._mag_db)
+            if hasattr(self, "_mag_db_action"):
+                self._mag_db_action.blockSignals(True)
+                self._mag_db_action.setChecked(self._mag_db)
+                self._mag_db_action.blockSignals(False)
+            self._measure_use_band_cb.setChecked(self._measure_use_band)
+            self._measure_f_lo_spin.setValue(float(self._measure_f_lo))
+            self._measure_f_hi_spin.setValue(float(self._measure_f_hi))
+        finally:
+            self._updating_measure_dock = False
+
+    def _on_mag_db_toggled(self, _checked: bool = False) -> None:
+        if self._updating_measure_dock:
+            return
+        self._set_mag_db(bool(self._mag_db_btn.isChecked()))
+
+    def _set_mag_db_from_menu(self, checked: bool) -> None:
+        self._set_mag_db(bool(checked))
+
+    def _set_mag_db(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if enabled == self._mag_db:
+            self._sync_measure_dock_controls()
+            return
+        self._mag_db = enabled
+        if 0 <= self._page_index < len(self._pages):
+            self._pages[self._page_index].mag_db = enabled
+        self._sync_measure_dock_controls()
+        self._redraw_curves(fit=False)
+        self._refresh_cursor_values_panel()
+        self._refresh_measure_dock()
+
+    def _on_measure_band_changed(self, *_args) -> None:  # noqa: ANN002
+        if self._updating_measure_dock:
+            return
+        self._measure_use_band = bool(self._measure_use_band_cb.isChecked())
+        self._measure_f_lo = float(self._measure_f_lo_spin.value())
+        self._measure_f_hi = float(self._measure_f_hi_spin.value())
+        if 0 <= self._page_index < len(self._pages):
+            page = self._pages[self._page_index]
+            page.measure_use_band = self._measure_use_band
+            page.measure_f_lo = self._measure_f_lo
+            page.measure_f_hi = self._measure_f_hi
+        self._refresh_measure_dock()
+
+    def _measure_band_from_markers(self) -> None:
+        vals: list[float] = []
+        for group in self._synced_markers:
+            if group.vertical and group.lines:
+                vals.append(float(group.lines[0].value()))
+            if len(vals) >= 2:
+                break
+        if len(vals) < 2:
+            QMessageBox.information(
+                self,
+                "Band from markers",
+                "Need at least two vertical markers (V1, V2).",
+            )
+            return
+        lo, hi = sorted(vals[:2])
+        self._updating_measure_dock = True
+        try:
+            self._measure_use_band_cb.setChecked(True)
+            self._measure_f_lo_spin.setValue(lo)
+            self._measure_f_hi_spin.setValue(hi)
+        finally:
+            self._updating_measure_dock = False
+        self._on_measure_band_changed()
+
+    def _primary_spectrum_for_measure(self) -> Series | None:
+        """Prefer Mag panel series; fall back to any frequency panel."""
+        candidates: list[_PlotPanel] = []
+        active = self._active_cursor_panel()
+        if active is not None and active.is_frequency():
+            candidates.append(active)
+        for panel in self._panels:
+            if panel is active:
+                continue
+            if panel.y_kind == "mag":
+                candidates.append(panel)
+        for panel in self._panels:
+            if panel in candidates:
+                continue
+            if panel.is_frequency():
+                candidates.append(panel)
+        for panel in candidates:
+            for sid in panel.series_ids:
+                series = self._project.get(sid)
+                if series is None or series.is_spectrogram():
+                    continue
+                return series
+        return None
+
+    def _spectrum_mag_for_measure(
+        self, series: Series
+    ) -> tuple[np.ndarray, np.ndarray, str]:
+        freq, mag = self._spectrum_xy(series, "mag")
+        scale = series_amplitude_scale(series.meta.attrs)
+        return freq, mag, scale
+
+    def _refresh_measure_dock(self) -> None:
+        if not hasattr(self, "_measure_overall_label"):
+            return
+        series = self._primary_spectrum_for_measure()
+        if series is None:
+            self._measure_series_label.setText("Series: —")
+            self._measure_overall_label.setText("Overall RMS: —")
+            self._measure_band_label.setText("Band RMS: —")
+            self._measure_peaks_table.setRowCount(0)
+            return
+        freq, mag, scale = self._spectrum_mag_for_measure(series)
+        unit = series.unit or ""
+        unit_txt = f" {unit}" if unit else ""
+        self._measure_series_label.setText(
+            f"Series: {series.display_name}  (scale={scale})"
+        )
+        if freq.size == 0:
+            self._measure_overall_label.setText("Overall RMS: —")
+            self._measure_band_label.setText("Band RMS: —")
+            return
+        overall = band_rms(freq, mag, amplitude_scale=scale)
+        overall_db = level_db(overall)
+        self._measure_overall_label.setText(
+            f"Overall RMS: {overall:.6g}{unit_txt}  ({overall_db:.2f} dB re{unit_txt or ' 1'})"
+        )
+        if self._measure_use_band and self._measure_f_hi > self._measure_f_lo:
+            band = band_rms(
+                freq,
+                mag,
+                f_lo=self._measure_f_lo,
+                f_hi=self._measure_f_hi,
+                amplitude_scale=scale,
+            )
+            band_db = level_db(band)
+            self._measure_band_label.setText(
+                f"Band RMS [{self._measure_f_lo:.4g}–{self._measure_f_hi:.4g} Hz]: "
+                f"{band:.6g}{unit_txt}  ({band_db:.2f} dB re{unit_txt or ' 1'})"
+            )
+        else:
+            self._measure_band_label.setText("Band RMS: (enable band / set f min < f max)")
+
+    def _pick_spectrum_peaks(self) -> None:
+        series = self._primary_spectrum_for_measure()
+        if series is None:
+            QMessageBox.information(
+                self,
+                "Pick peaks",
+                "Assign a spectrum (or time) series to a Mag frequency panel first.",
+            )
+            return
+        if not self._panels:
+            return
+        n_peaks = (
+            int(self._measure_n_peaks_spin.value())
+            if hasattr(self, "_measure_n_peaks_spin")
+            else 5
+        )
+        freq, mag, _scale = self._spectrum_mag_for_measure(series)
+        peaks = find_spectrum_peaks(freq, mag, n_peaks=n_peaks)
+        if not peaks:
+            QMessageBox.information(self, "Pick peaks", "No local maxima found.")
+            self._measure_peaks_table.setRowCount(0)
+            return
+        unit = series.unit or ""
+        self._measure_peaks_table.setRowCount(len(peaks))
+        for r, (f_hz, mag_lin, _idx) in enumerate(peaks):
+            if self._mag_db:
+                mag_txt = f"{float(to_db(mag_lin)):.3g} dB"
+                unit_txt = f"re {unit}" if unit else "re mag"
+            else:
+                mag_txt = f"{mag_lin:.6g}"
+                unit_txt = unit
+            self._measure_peaks_table.setItem(r, 0, QTableWidgetItem(f"{f_hz:.6g}"))
+            self._measure_peaks_table.setItem(r, 1, QTableWidgetItem(mag_txt))
+            self._measure_peaks_table.setItem(r, 2, QTableWidgetItem(unit_txt))
+            self.add_marker(vertical=True, value=float(f_hz))
+        self._refresh_cursor_values_panel()
+        self._refresh_measure_dock()
+        if hasattr(self, "_measure_dock_action"):
+            self._measure_dock_action.setChecked(True)
+        self._measure_dock.setVisible(True)
+        self._measure_dock.raise_()
+        self.statusBar().showMessage(f"Placed {len(peaks)} peak marker(s)", 4000)
+
     def open_project_dialog(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self,
             "Open project",
             "",
-            "nagilize project (*.nagproj);;All files (*)",
+            "Ginkyo project (*.ginkyo);;All files (*)",
         )
         if not path:
             return
@@ -1840,14 +2196,14 @@ class MainWindow(QMainWindow):
         self._load_project_into_window(project)
 
     def save_project_dialog(self) -> None:
-        suggested = "project.nagproj"
+        suggested = "project.ginkyo"
         if self._project.path is not None:
             suggested = str(self._project.path)
         path, _ = QFileDialog.getSaveFileName(
             self,
             "Save project",
             suggested,
-            "nagilize project (*.nagproj);;All files (*)",
+            "Ginkyo project (*.ginkyo);;All files (*)",
         )
         if not path:
             return
@@ -1892,6 +2248,10 @@ class MainWindow(QMainWindow):
                 {
                     "title": page.title,
                     "display_mode": page.display_mode,
+                    "mag_db": bool(page.mag_db),
+                    "measure_use_band": bool(page.measure_use_band),
+                    "measure_f_lo": float(page.measure_f_lo),
+                    "measure_f_hi": float(page.measure_f_hi),
                     "workspace": ws.to_dict(),
                     "markers": markers,
                     "view_ranges": view_ranges,
@@ -1951,6 +2311,10 @@ class MainWindow(QMainWindow):
                 title=title,
                 workspace=workspace,
                 display_mode=mode,
+                mag_db=bool(raw.get("mag_db", False)),
+                measure_use_band=bool(raw.get("measure_use_band", False)),
+                measure_f_lo=float(raw.get("measure_f_lo") or 0.0),
+                measure_f_hi=float(raw.get("measure_f_hi") or 0.0),
                 pending_markers=markers,
                 pending_view_ranges=list(raw.get("view_ranges") or []),
                 active_panel=int(raw.get("active_panel") or 0),
@@ -2635,6 +2999,7 @@ class MainWindow(QMainWindow):
                 vb.disableAutoRange()
 
         self._refresh_spectrogram_dock()
+        self._refresh_measure_dock()
 
     def _draw_time_panels(self) -> None:
         for i, panel in enumerate(self._panels):
@@ -2993,9 +3358,23 @@ class MainWindow(QMainWindow):
             "imag": ("Imag", ""),
         }
         y_name, y_unit = label_map.get(panel.y_kind, ("Y", ""))
+        units = {
+            s.unit
+            for sid in panel.series_ids
+            for s in [self._project.get(sid)]
+            if s is not None and s.unit and panel.y_kind != "phase"
+        }
+        series_unit = next(iter(units)) if len(units) == 1 else ""
         panel.plot.setLabel("bottom", "Frequency", units="Hz")
-        if y_unit:
+        if panel.y_kind == "mag" and self._mag_db:
+            if series_unit:
+                panel.plot.setLabel("left", f"Magnitude (dB re {series_unit})")
+            else:
+                panel.plot.setLabel("left", "Magnitude (dB)")
+        elif y_unit:
             panel.plot.setLabel("left", y_name, units=y_unit)
+        elif series_unit:
+            panel.plot.setLabel("left", f"{y_name} ({series_unit})")
         else:
             panel.plot.setLabel("left", y_name)
         panel.plot.setTitle(y_name)
@@ -3006,6 +3385,8 @@ class MainWindow(QMainWindow):
             freq, y = self._spectrum_xy(series, panel.y_kind)
             if freq.size == 0:
                 continue
+            if panel.y_kind == "mag" and self._mag_db:
+                y = np.asarray(to_db(y), dtype=np.float64)
             color = self._color_for_panel_series(panel, sid)
             curve = panel.plot.plot(
                 freq,
@@ -3065,12 +3446,12 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(
                 f"project: {n_src} sources, {n_ser} series | panels={n_panels}"
             )
-            self.setWindowTitle("nagilize")
+            self.setWindowTitle("Ginkyo 吟響")
             return
         self.statusBar().showMessage(
             f"project: {n_src} sources, {n_ser} series | panels={n_panels}"
         )
-        self.setWindowTitle(f"nagilize — {src.label} (+{max(0, n_src - 1)} more)")
+        self.setWindowTitle(f"Ginkyo 吟響 — {src.label} (+{max(0, n_src - 1)} more)")
 
     def _panel_at_scene_pos(self, scene_pos) -> _PlotPanel | None:  # noqa: ANN001
         for i, panel in enumerate(self._panels):
@@ -3167,17 +3548,25 @@ class MainWindow(QMainWindow):
                 )
             return rows
         if self._spectrum_mode() or panel.is_frequency():
-            for curve in panel.curves:
-                data = curve.getData()
-                if data is None or data[0] is None or data[1] is None:
+            for sid in panel.series_ids:
+                series = self._project.get(sid)
+                if series is None or series.is_spectrogram():
                     continue
-                xd = np.asarray(data[0], dtype=np.float64).reshape(-1)
-                yd = np.asarray(data[1], dtype=np.float64).reshape(-1)
-                if xd.size == 0 or yd.size == 0 or xd.size != yd.size:
+                freq, y = self._spectrum_xy(series, panel.y_kind)
+                if freq.size == 0 or y.size == 0:
                     continue
-                idx = self._nearest_index(xd, x)
-                name = curve.name() or "curve"
-                rows.append((name, f"{float(yd[idx]):.6g}"))
+                idx = self._nearest_index(freq, x)
+                val = float(y[idx])
+                name = series.display_name
+                if panel.y_kind == "phase":
+                    rows.append((name, f"{val:.6g} rad"))
+                elif panel.y_kind == "mag" and self._mag_db:
+                    db = float(to_db(val))
+                    unit = f" {series.unit}" if series.unit else ""
+                    rows.append((name, f"{db:.3g} dB re{unit or ' mag'}"))
+                else:
+                    unit = f" {series.unit}" if series.unit else ""
+                    rows.append((name, f"{val:.6g}{unit}"))
             return rows
 
         for sid in panel.series_ids:
@@ -3226,9 +3615,10 @@ class MainWindow(QMainWindow):
                     rows.append((at, "f [Hz]", f"{x:.6g}"))
                     rows.append((at, "t [s]", f"{y:.6g}"))
             elif freq_panel:
-                parts.append(f"y={y:.6g}")
+                y_label = "y [dB]" if (panel is not None and panel.y_kind == "mag" and self._mag_db) else "y"
+                parts.append(f"{y_label}={y:.6g}")
                 rows.append((at, f"{x_name} [{x_unit}]", f"{x:.6g}"))
-                rows.append((at, "y", f"{y:.6g}"))
+                rows.append((at, y_label, f"{y:.6g}"))
             else:
                 rows.append((at, f"{x_name} [{x_unit}]", f"{x:.6g}"))
             for name, value in self._series_value_at_x(panel, x):

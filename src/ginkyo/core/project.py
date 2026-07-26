@@ -9,7 +9,7 @@ from uuid import uuid4
 
 import numpy as np
 
-from nagilize.core.model import Recording, SeriesMeta
+from ginkyo.core.model import Recording, SeriesMeta
 
 
 @dataclass
@@ -571,12 +571,12 @@ class Project:
 
     @classmethod
     def open(cls, path: str | Path) -> Project:
-        from nagilize.core.project_io import load_project
+        from ginkyo.core.project_io import load_project
 
         return load_project(path)
 
     def save(self, path: str | Path | None = None, *, views: list | None = None) -> Path:
-        from nagilize.core.project_io import save_project
+        from ginkyo.core.project_io import save_project
 
         target = Path(path) if path is not None else self.path
         if target is None:

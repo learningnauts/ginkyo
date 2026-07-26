@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from nagilize.core.spectrum import (
+from ginkyo.core.spectrum import (
     SpectrumParams,
     compute_spectrum,
     frequency_resolution_hz,
@@ -15,7 +15,7 @@ from nagilize.core.spectrum import (
 
 
 def test_compute_stft_shape_and_frames() -> None:
-    from nagilize.core.spectrum import compute_stft, stft_frame_count, stft_hop_samples
+    from ginkyo.core.spectrum import compute_stft, stft_frame_count, stft_hop_samples
 
     fs = 1000.0
     n = 4096
@@ -34,7 +34,7 @@ def test_compute_stft_shape_and_frames() -> None:
 
 
 def test_compute_stft_fixed_dt() -> None:
-    from nagilize.core.spectrum import compute_stft, stft_hop_samples
+    from ginkyo.core.spectrum import compute_stft, stft_hop_samples
 
     fs = 1000.0
     y = np.random.default_rng(1).normal(size=4096)
@@ -50,7 +50,7 @@ def test_compute_stft_fixed_dt() -> None:
 
 
 def test_angle_from_pulse_increments_per_edge() -> None:
-    from nagilize.core.spectrum import angle_from_pulse
+    from ginkyo.core.spectrum import angle_from_pulse
 
     fs = 1000.0
     # Square pulse train: 4 rising edges → 4 * 360° with ppr=1
@@ -69,7 +69,7 @@ def test_angle_from_pulse_increments_per_edge() -> None:
 
 
 def test_angle_from_rpm_linear() -> None:
-    from nagilize.core.spectrum import angle_from_rpm
+    from ginkyo.core.spectrum import angle_from_rpm
 
     fs = 100.0
     n = 200
@@ -86,7 +86,7 @@ def test_angle_from_rpm_linear() -> None:
 
 
 def test_equal_angle_frame_count() -> None:
-    from nagilize.core.spectrum import equal_angle_frame_starts
+    from ginkyo.core.spectrum import equal_angle_frame_starts
 
     fs = 1000.0
     n = 2000
@@ -111,7 +111,7 @@ def test_equal_angle_frame_count() -> None:
 
 
 def test_compute_stft_equal_angle() -> None:
-    from nagilize.core.spectrum import angle_from_rpm, compute_stft
+    from ginkyo.core.spectrum import angle_from_rpm, compute_stft
 
     fs = 1000.0
     n = 4096
@@ -139,7 +139,7 @@ def test_compute_stft_equal_angle() -> None:
 
 
 def test_rpm_from_pulse_constant_speed() -> None:
-    from nagilize.core.spectrum import rpm_from_pulse
+    from ginkyo.core.spectrum import rpm_from_pulse
 
     fs = 1000.0
     n = 2000
@@ -153,7 +153,7 @@ def test_rpm_from_pulse_constant_speed() -> None:
 
 
 def test_equal_rpm_frame_count() -> None:
-    from nagilize.core.spectrum import equal_rpm_frame_starts
+    from ginkyo.core.spectrum import equal_rpm_frame_starts
 
     fs = 1000.0
     n = 5000
@@ -178,7 +178,7 @@ def test_equal_rpm_frame_count() -> None:
 
 
 def test_compute_stft_equal_rpm() -> None:
-    from nagilize.core.spectrum import angle_from_rpm, compute_stft
+    from ginkyo.core.spectrum import angle_from_rpm, compute_stft
 
     fs = 1000.0
     n = 4096
@@ -209,9 +209,9 @@ def test_compute_stft_equal_rpm() -> None:
 
 
 def test_spectrogram_frame_rpm_roundtrip(tmp_path) -> None:
-    from nagilize.core.dummy import make_sine_with_noise
-    from nagilize.core.project import Project
-    from nagilize.core.spectrum import angle_from_rpm, compute_stft
+    from ginkyo.core.dummy import make_sine_with_noise
+    from ginkyo.core.project import Project
+    from ginkyo.core.spectrum import angle_from_rpm, compute_stft
 
     project = Project()
     project.add_recording(make_sine_with_noise())
@@ -250,7 +250,7 @@ def test_spectrogram_frame_rpm_roundtrip(tmp_path) -> None:
         rpm=stft.rpm,
         params_dict=stft.params.to_dict(),
     )
-    path = tmp_path / "rpm.nagproj"
+    path = tmp_path / "rpm.ginkyo"
     project.save(path)
     loaded = Project.open(path)
     result = loaded.get(sid)
@@ -262,9 +262,9 @@ def test_spectrogram_frame_rpm_roundtrip(tmp_path) -> None:
 
 
 def test_spectrogram_frame_angle_roundtrip(tmp_path) -> None:
-    from nagilize.core.dummy import make_sine_with_noise
-    from nagilize.core.project import Project
-    from nagilize.core.spectrum import angle_from_rpm, compute_stft
+    from ginkyo.core.dummy import make_sine_with_noise
+    from ginkyo.core.project import Project
+    from ginkyo.core.spectrum import angle_from_rpm, compute_stft
 
     project = Project()
     project.add_recording(make_sine_with_noise())
@@ -301,7 +301,7 @@ def test_spectrogram_frame_angle_roundtrip(tmp_path) -> None:
         angle_deg=stft.angle_deg,
         params_dict=stft.params.to_dict(),
     )
-    path = tmp_path / "angle.nagproj"
+    path = tmp_path / "angle.ginkyo"
     project.save(path)
     loaded = Project.open(path)
     result = loaded.get(sid)
@@ -313,9 +313,9 @@ def test_spectrogram_frame_angle_roundtrip(tmp_path) -> None:
 
 
 def test_spectrogram_project_roundtrip(tmp_path) -> None:
-    from nagilize.core.dummy import make_sine_with_noise
-    from nagilize.core.project import Project
-    from nagilize.core.spectrum import compute_stft
+    from ginkyo.core.dummy import make_sine_with_noise
+    from ginkyo.core.project import Project
+    from ginkyo.core.spectrum import compute_stft
 
     project = Project()
     project.add_recording(make_sine_with_noise())
@@ -341,7 +341,7 @@ def test_spectrogram_project_roundtrip(tmp_path) -> None:
         source=dataset,
         params_dict=stft.params.to_dict(),
     )
-    path = tmp_path / "t.nagproj"
+    path = tmp_path / "t.ginkyo"
     project.save(path)
     loaded = Project.open(path)
     result = loaded.get(sid)
@@ -411,7 +411,7 @@ def test_averaging_runs() -> None:
 
 
 def test_stft_hop_and_frame_count() -> None:
-    from nagilize.core.spectrum import (
+    from ginkyo.core.spectrum import (
         max_averages,
         stft_frame_count,
         stft_hop_samples,
@@ -429,7 +429,7 @@ def test_stft_hop_and_frame_count() -> None:
 
 
 def test_averaging_count_clamped_to_max() -> None:
-    from nagilize.core.spectrum import max_averages
+    from ginkyo.core.spectrum import max_averages
 
     fs = 1000.0
     y = np.random.default_rng(0).normal(size=4096)
@@ -498,8 +498,8 @@ def test_explicit_nfft_below_length_changes_resolution() -> None:
 
 
 def test_project_spectrum_roundtrip(tmp_path) -> None:
-    from nagilize.core.dummy import make_sine_with_noise
-    from nagilize.core.project import Project
+    from ginkyo.core.dummy import make_sine_with_noise
+    from ginkyo.core.project import Project
 
     project = Project()
     project.add_recording(make_sine_with_noise())
@@ -517,7 +517,7 @@ def test_project_spectrum_roundtrip(tmp_path) -> None:
         source=dataset,
         params_dict=spec.params.to_dict(),
     )
-    path = tmp_path / "t.nagproj"
+    path = tmp_path / "t.ginkyo"
     project.save(path)
     loaded = Project.open(path)
     result = loaded.get(sid)
@@ -531,8 +531,8 @@ def test_project_spectrum_roundtrip(tmp_path) -> None:
 
 
 def test_each_fft_run_makes_new_dataset() -> None:
-    from nagilize.core.dummy import make_sine_with_noise
-    from nagilize.core.project import Project
+    from ginkyo.core.dummy import make_sine_with_noise
+    from ginkyo.core.project import Project
 
     project = Project()
     project.add_recording(make_sine_with_noise())

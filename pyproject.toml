@@ -3,8 +3,8 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "nagilize"
-version = "0.0.1"
+name = "ginkyo"
+version = "0.1.0"
 description = "Vibration and sound analysis workbench (unofficial; not affiliated with HBK/LAN-XI)"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -17,7 +17,7 @@ dependencies = [
 ]
 
 [project.scripts]
-nagilize = "nagilize.__main__:main"
+ginkyo = "ginkyo.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from nagilize.core import Channel, Recording
+from ginkyo.core import Channel, Recording
 
 
 def make_sine_with_noise(

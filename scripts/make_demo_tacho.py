@@ -10,8 +10,8 @@ from pathlib import Path
 
 import numpy as np
 
-from nagilize.core.model import Channel, Recording
-from nagilize.export.csv_export import export_csv
+from ginkyo.core.model import Channel, Recording
+from ginkyo.export.csv_export import export_csv
 
 
 def _vibration_from_angle(
