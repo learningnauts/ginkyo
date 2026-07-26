@@ -1,4 +1,4 @@
-# Release checklist (v0.1+)
+# Release checklist (v0.1+)　
 
 Human steps to publish source + Windows/macOS binaries.
 
