@@ -2,8 +2,6 @@
 
 音を吟味する、振動・音データの解析ワークベンチ。
 
-**非公式OSSです。HBK / Brüel & Kjær / LAN-XI とは無関係です。**
-
 ## Status
 
 **v0.1.0** — ファイルを開く・見る・FFT/STFT・スペクトル計測・プロジェクト保存まで一通り使えるプレビュー版。
@@ -89,10 +87,6 @@ pyinstaller packaging/ginkyo.spec --noconfirm
 ## License
 
 MIT — see [LICENSE](LICENSE).
-
-## Disclaimer
-
-Ginkyo (吟響) is an independent open-source project. It is **not** affiliated with, endorsed by, or connected to Hottinger Brüel & Kjær (HBK), Brüel & Kjær, or LAN-XI products.
 
 ## Notes
 

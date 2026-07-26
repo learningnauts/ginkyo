@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ginkyo"
 version = "0.1.0"
-description = "Vibration and sound analysis workbench (unofficial; not affiliated with HBK/LAN-XI)"
+description = "Vibration and sound analysis workbench"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
