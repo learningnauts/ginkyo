@@ -13,9 +13,11 @@ Human steps to publish source + Windows/macOS binaries.
 ## Tag and push
 
 ```bash
+git push dev main            # keep development remote in sync
+git push public main         # publish the release commit
 git tag -a v0.1.0 -m "ginkyo 0.1.0"
-git push origin main
-git push origin v0.1.0
+git push public v0.1.0       # this tag triggers the build
+git push dev v0.1.0
 ```
 
 Pushing a `v*` tag runs [`.github/workflows/release.yml`](.github/workflows/release.yml):
