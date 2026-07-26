@@ -12,7 +12,7 @@
 
 ## Download（使う人向け）
 
-1. [Releases](https://github.com/learningnauts/ginkyo-dev/releases) から最新の zip を取得  
+1. [Releases](https://github.com/learningnauts/ginkyo/releases) から最新の zip を取得  
    - `ginkyo-windows-x64.zip`  
    - `ginkyo-macos-arm64.zip`（Apple Silicon 向け。Intel Mac はソースから実行）
 2. 展開して `ginkyo`（Windows は `ginkyo.exe`）を起動  

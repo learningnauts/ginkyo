@@ -8,7 +8,7 @@ Human steps to publish source + Windows/macOS binaries.
 2. `pyproject.toml` / `ginkyo.__version__` match the tag (e.g. `0.1.0` ↔ `v0.1.0`)
 3. `CHANGELOG.md` has a section for this version
 4. README Status / Download / Known limitations look current
-5. Decide public repo name (current GitHub remote is `learningnauts/nagilize-dev`; rename to `ginkyo` / `ginkyo-dev` on GitHub, then update `git remote set-url`)
+5. Remotes: `dev` → `learningnauts/ginkyo-dev` (development), `public` → `learningnauts/ginkyo` (users / Releases)
 
 ## Tag and push
 
