@@ -8,6 +8,12 @@
 
 日常利用は **GitHub Releases の実行ファイル**（Windows / macOS）を想定。ソースは同じリポジトリで公開（MIT）。
 
+## Screenshots
+
+![Views — 波形表示](docs/images/screenshot-views.png)
+
+![Analysis — Spectrum (FFT) 設定](docs/images/screenshot-analysis.png)
+
 ## Download（使う人向け）
 
 1. [Releases](https://github.com/learningnauts/ginkyo/releases) から最新の zip を取得  
